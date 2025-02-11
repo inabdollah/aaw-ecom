@@ -21,8 +21,7 @@ export const config = {
 };
 
 /** 
- * isBackgroundPixel, your Sharp pipeline, etc. 
- * (copy all your existing code for bounding box and compositing here)
+ * Determines whether a pixel should be considered background.
  */
 function isBackgroundPixel(r: number, g: number, b: number): boolean {
   const whiteThreshold = 220;
@@ -42,8 +41,11 @@ function isBackgroundPixel(r: number, g: number, b: number): boolean {
   return false;
 }
 
+/**
+ * Processes an image buffer and appends the final JPEG image to the ZIP archive.
+ */
 async function processImageBuffer(inputBuffer: Buffer, filename: string, archive: archiver.Archiver) {
-  // === Your existing 2000×2000 composition, bounding box detection, etc. ===
+  // Create a 2000×2000 canvas and composite the input image in the center.
   const composedBuffer = await sharp({
     create: {
       width: 2000,
@@ -53,14 +55,17 @@ async function processImageBuffer(inputBuffer: Buffer, filename: string, archive
     },
   })
     .composite([{ input: inputBuffer, gravity: "center" }])
-    .png()
+    .png() // Keep as PNG for processing
     .toBuffer();
 
   let image = sharp(composedBuffer).ensureAlpha();
   const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
   const { width, height, channels } = info;
 
-  let minX = width, minY = height, maxX = 0, maxY = 0;
+  let minX = width,
+    minY = height,
+    maxX = 0,
+    maxY = 0;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = (y * width + x) * channels;
@@ -122,19 +127,20 @@ async function processImageBuffer(inputBuffer: Buffer, filename: string, archive
   const leftX = Math.floor(canvasWidth / 2 - resizedProductCenterX);
   const topY = canvasHeight - 212 - resizedProductBottomOffset;
 
+  // Create final canvas and composite the resized image.
   const finalImageBuffer = await sharp({
     create: {
       width: canvasWidth,
       height: canvasHeight,
-      channels: 4,
-      background: { r: 255, g: 255, b: 255, alpha: 1 },
+      channels: 3, // JPEG does not support alpha
+      background: { r: 255, g: 255, b: 255 },
     },
   })
     .composite([{ input: resizedBuffer, left: leftX, top: topY }])
-    .png()
+    .jpeg({ quality: 90 })
     .toBuffer();
 
-  // Add to ZIP
+  // Append the JPEG image to the ZIP archive.
   archive.append(finalImageBuffer, { name: filename });
 }
 
@@ -167,7 +173,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       sheetFile = Array.isArray(files.sheet) ? files.sheet[0] : files.sheet;
     }
 
-    // Prepare ZIP
+    // Prepare ZIP response
     res.writeHead(200, {
       "Content-Type": "application/zip",
       "Content-Disposition": `attachment; filename="SKU-Images-${Date.now()}.zip"`,
@@ -182,14 +188,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     for (const f of fileArray) {
       const filePath = f.filepath;
       const originalBuffer = fs.readFileSync(filePath);
-      const outName = f.originalFilename || `processed-${Date.now()}.png`;
+      // Ensure the filename has a .jpg extension
+      const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
+      const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
       await processImageBuffer(originalBuffer, outName, archive);
     }
 
     // 2) Process the CSV sheet (fetch each image_url, rename as product_sku)
     if (sheetFile) {
       const sheetBuffer = fs.readFileSync(sheetFile.filepath);
-      // Convert buffer to string (assuming CSV is UTF-8):
+      // Convert buffer to string (assuming CSV is UTF-8)
       const csvString = sheetBuffer.toString("utf8");
 
       const parsed = Papa.parse(csvString, {
@@ -214,8 +222,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             continue;
           }
           const imgBuffer = await response.buffer();
-          // Use your existing pipeline:
-          const filename = `${productSku}.png`; // or .jpg, etc.
+          // Use the product SKU for the filename with a .jpg extension
+          const filename = `${productSku}.jpg`;
           await processImageBuffer(imgBuffer, filename, archive);
         } catch (err) {
           console.error("Error fetching image URL:", err);

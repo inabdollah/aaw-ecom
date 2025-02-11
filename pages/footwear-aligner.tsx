@@ -1,14 +1,68 @@
 // pages/footwear-aligner.tsx
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-/* eslint-disable prefer-const */
 // @ts-nocheck
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 import axios from "axios";
+import { useDropzone } from "react-dropzone";
+
+// A reusable FilePicker component that provides a drag & drop area
+const FilePicker = ({
+  accept,
+  multiple,
+  onFilesSelected,
+  selectedFiles,
+  placeholder,
+}: {
+  accept: { [key: string]: string[] };
+  multiple: boolean;
+  onFilesSelected: (files: File[]) => void;
+  selectedFiles: File[] | File | null;
+  placeholder: string;
+}) => {
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    accept,
+    multiple,
+    onDrop: (acceptedFiles) => {
+      onFilesSelected(acceptedFiles);
+    },
+  });
+
+  return (
+    <div
+      {...getRootProps()}
+      className={`border-2 border-dashed p-4 text-center rounded cursor-pointer transition-colors ${
+        isDragActive ? "border-blue-500" : "border-gray-300"
+      }`}
+    >
+      <input {...getInputProps()} />
+      {isDragActive ? (
+        <p className="text-blue-500">Drop the files here ...</p>
+      ) : (
+        <p className="text-gray-600">{placeholder}</p>
+      )}
+      {/* Display file names if files are selected */}
+      {selectedFiles &&
+        ((Array.isArray(selectedFiles) && selectedFiles.length > 0) ||
+          (!Array.isArray(selectedFiles) && selectedFiles)) && (
+          <div className="mt-2">
+            {Array.isArray(selectedFiles) ? (
+              selectedFiles.map((file, index) => (
+                <p key={index} className="text-sm text-gray-700">
+                  {file.name}
+                </p>
+              ))
+            ) : (
+              <p className="text-sm text-gray-700">{selectedFiles.name}</p>
+            )}
+          </div>
+        )}
+    </div>
+  );
+};
 
 function FootwearAligner() {
-  const [selectedImages, setSelectedImages] = useState<FileList | null>(null);
+  const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [selectedSheet, setSelectedSheet] = useState<File | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -19,25 +73,9 @@ function FootwearAligner() {
   // "idle" | "uploading" | "processing" | "downloading"
   const [stage, setStage] = useState<"idle" | "uploading" | "processing" | "downloading">("idle");
 
-  const imagesInputRef = useRef<HTMLInputElement>(null);
-  const sheetInputRef = useRef<HTMLInputElement>(null);
-
-  const handleImagesChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      setSelectedImages(e.target.files);
-    }
-  };
-
-  const handleSheetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setSelectedSheet(e.target.files[0]);
-    }
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // You can decide whether you want to force the user to pick either images or a sheet, or both, etc.
-    if (!selectedImages && !selectedSheet) {
+    if (selectedImages.length === 0 && !selectedSheet) {
       setMessage("Please upload images or a sheet before processing.");
       return;
     }
@@ -50,8 +88,8 @@ function FootwearAligner() {
 
     // Build your FormData
     const formData = new FormData();
-    if (selectedImages) {
-      Array.from(selectedImages).forEach((file) => {
+    if (selectedImages.length > 0) {
+      selectedImages.forEach((file) => {
         formData.append("images", file);
       });
     }
@@ -60,7 +98,6 @@ function FootwearAligner() {
     }
 
     try {
-      // POST to our new endpoint that can handle both raw images and a CSV sheet:
       const res = await axios.post("/api/process-sneakers-aligner", formData, {
         responseType: "blob",
         onUploadProgress: (progressEvent) => {
@@ -81,13 +118,14 @@ function FootwearAligner() {
         },
       });
 
+      // Extract filename from response headers if available
       const disposition = res.headers["content-disposition"];
       let filename = "download.zip";
       if (disposition && disposition.indexOf("filename=") !== -1) {
         filename = disposition.split("filename=")[1].replace(/['"]/g, "");
       }
 
-      // Trigger download
+      // Trigger download of the resulting file
       const blob = new Blob([res.data], { type: "application/zip" });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -117,43 +155,45 @@ function FootwearAligner() {
         </div>
       </header>
 
-      {/* Main */}
+      {/* Main content */}
       <main className="flex-grow flex items-center justify-center">
         <div className="max-w-lg w-full p-6">
           <div className="bg-white rounded shadow p-6">
             <h2 className="text-xl font-bold mb-4 text-gray-800">Upload Options</h2>
             <form onSubmit={handleSubmit} className="space-y-6">
-              {/* Upload images */}
+              {/* Images Dropzone */}
               <div>
                 <label className="font-semibold text-gray-700 mb-2 block">
                   Upload Individual Images
                 </label>
-                <input
-                  ref={imagesInputRef}
-                  type="file"
-                  multiple
-                  accept="image/*"
-                  onChange={handleImagesChange}
-                  className="block w-full"
+                <FilePicker
+                  accept={{ "image/*": [".jpeg", ".jpg", ".png", ".gif"] }}
+                  multiple={true}
+                  onFilesSelected={(files) => setSelectedImages(files)}
+                  selectedFiles={selectedImages}
+                  placeholder="Drag & drop images here, or click to select files"
                 />
-                {selectedImages && (
+                {selectedImages.length > 0 && (
                   <p className="text-gray-700 mt-2">
                     {selectedImages.length} image(s) selected.
                   </p>
                 )}
               </div>
 
-              {/* Upload sheet */}
+              {/* Sheet Dropzone */}
               <div>
                 <label className="font-semibold text-gray-700 mb-2 block">
                   Or Upload a CSV/XLS Sheet
                 </label>
-                <input
-                  ref={sheetInputRef}
-                  type="file"
-                  accept=".csv,.xlsx"
-                  onChange={handleSheetChange}
-                  className="block w-full"
+                <FilePicker
+                  accept={{
+                    "text/csv": [".csv"],
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+                  }}
+                  multiple={false}
+                  onFilesSelected={(files) => setSelectedSheet(files[0])}
+                  selectedFiles={selectedSheet}
+                  placeholder="Drag & drop a CSV/XLSX file here, or click to select file"
                 />
                 {selectedSheet && (
                   <p className="text-gray-700 mt-2">Selected Sheet: {selectedSheet.name}</p>
@@ -169,7 +209,7 @@ function FootwearAligner() {
                 {loading ? "Processing..." : "Process"}
               </button>
 
-              {/* Progress bar */}
+              {/* Progress Indicators */}
               {loading && (
                 <div>
                   {stage === "uploading" && (
@@ -205,7 +245,9 @@ function FootwearAligner() {
 
             {/* Feedback Message */}
             {message && (
-              <div className="mt-4 p-4 rounded bg-gray-100 text-gray-700">{message}</div>
+              <div className="mt-4 p-4 rounded bg-gray-100 text-gray-700">
+                {message}
+              </div>
             )}
           </div>
         </div>
