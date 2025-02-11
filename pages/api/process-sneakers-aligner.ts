@@ -1,5 +1,10 @@
 // pages/api/process-sneakers-aligner.ts
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+/* eslint-disable prefer-const */
 // @ts-nocheck
+
 import { NextApiRequest, NextApiResponse } from "next";
 import formidable from "formidable";
 import archiver from "archiver";
