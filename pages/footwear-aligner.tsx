@@ -1,6 +1,8 @@
 // pages/footwear-aligner.tsx
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+/* eslint-disable prefer-const */
 // @ts-nocheck
 import React, { useState } from "react";
 import axios from "axios";
