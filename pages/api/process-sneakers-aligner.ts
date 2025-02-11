@@ -195,41 +195,44 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     // 2) Process the CSV sheet (fetch each image_url, rename as product_sku)
-    if (sheetFile) {
-      const sheetBuffer = fs.readFileSync(sheetFile.filepath);
-      // Convert buffer to string (assuming CSV is UTF-8)
-      const csvString = sheetBuffer.toString("utf8");
+if (sheetFile) {
+  const sheetBuffer = fs.readFileSync(sheetFile.filepath);
+  // Convert buffer to string (assuming CSV is UTF-8)
+  const csvString = sheetBuffer.toString("utf8");
 
-      const parsed = Papa.parse(csvString, {
-        header: true,
-        skipEmptyLines: true,
-      });
+  const parsed = Papa.parse(csvString, {
+    header: true,
+    skipEmptyLines: true,
+  });
 
-      if (parsed.errors && parsed.errors.length) {
-        console.error("CSV parse errors:", parsed.errors);
+  if (parsed.errors && parsed.errors.length) {
+    console.error("CSV parse errors:", parsed.errors);
+  }
+
+  for (const row of parsed.data) {
+    const imageUrl = row["image_url"];
+    const productSku = row["product_sku"];
+    if (!imageUrl || !productSku) continue;
+
+    // Fetch the image using the updated approach:
+    try {
+      const response = await fetch(imageUrl);
+      if (!response.ok) {
+        console.warn(`Failed to fetch ${imageUrl}: ${response.statusText}`);
+        continue;
       }
+      // Use arrayBuffer() and convert it to a Node.js Buffer:
+      const arrayBuffer = await response.arrayBuffer();
+      const imgBuffer = Buffer.from(arrayBuffer);
 
-      for (const row of parsed.data) {
-        const imageUrl = row["image_url"];
-        const productSku = row["product_sku"];
-        if (!imageUrl || !productSku) continue;
-
-        // Fetch the image
-        try {
-          const response = await fetch(imageUrl);
-          if (!response.ok) {
-            console.warn(`Failed to fetch ${imageUrl}: ${response.statusText}`);
-            continue;
-          }
-          const imgBuffer = await response.buffer();
-          // Use the product SKU for the filename with a .jpg extension
-          const filename = `${productSku}.jpg`;
-          await processImageBuffer(imgBuffer, filename, archive);
-        } catch (err) {
-          console.error("Error fetching image URL:", err);
-        }
-      }
+      // Use the product SKU for the filename with a .jpg extension
+      const filename = `${productSku}.jpg`;
+      await processImageBuffer(imgBuffer, filename, archive);
+    } catch (err) {
+      console.error("Error fetching image URL:", err);
     }
+  }
+}
 
     await archive.finalize();
   } catch (error: any) {
