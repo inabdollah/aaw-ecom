@@ -18,6 +18,23 @@ import os from "os";
 // Server-side background removal
 let removeBackgroundNode: any = null;
 
+// Cache for processed images to avoid reprocessing on download
+interface ProcessedImageCache {
+  buffer: Buffer;
+  filename: string;
+  timestamp: number;
+}
+
+const imageCache = new Map<string, ProcessedImageCache[]>();
+
+// Configuration for production optimization
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const BATCH_SIZE = IS_PRODUCTION ? 5 : 10; // Smaller batches in production
+const MAX_CONCURRENT = IS_PRODUCTION ? 2 : 3; // Fewer concurrent operations in production
+const CACHE_EXPIRY = IS_PRODUCTION ? 10 * 60 * 1000 : 30 * 60 * 1000; // Shorter cache in production (10 min vs 30 min)
+
+console.log(`Environment: ${IS_PRODUCTION ? 'PRODUCTION' : 'DEVELOPMENT'} - Batch size: ${BATCH_SIZE}, Concurrent: ${MAX_CONCURRENT}`);
+
 // Initialize background removal library
 async function initBackgroundRemoval() {
   if (!removeBackgroundNode) {
@@ -27,6 +44,22 @@ async function initBackgroundRemoval() {
       console.log('Background removal library initialized');
     } catch (error) {
       console.error('Failed to initialize background removal:', error);
+    }
+  }
+}
+
+// Generate session ID for caching
+function generateSessionId(): string {
+  return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Clean expired cache entries
+function cleanExpiredCache() {
+  const now = Date.now();
+  for (const [sessionId, cache] of imageCache.entries()) {
+    if (cache.length > 0 && now - cache[0].timestamp > CACHE_EXPIRY) {
+      imageCache.delete(sessionId);
+      console.log(`Cleaned expired cache for session: ${sessionId}`);
     }
   }
 }
@@ -454,6 +487,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
+    // Clean expired cache entries
+    cleanExpiredCache();
+    
     const form = formidable({ multiples: true });
     const { files, fields } = await new Promise<{
       files: formidable.Files;
@@ -473,7 +509,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const removeBackgroundField = Array.isArray(fields.removeBackground) ? fields.removeBackground[0] : fields.removeBackground;
     const shouldRemoveBackground = removeBackgroundField === 'true' || removeBackgroundField === true;
     
-    console.log(`Processing request - Preview: ${isPreview}, Remove Background: ${shouldRemoveBackground}`);
+    // Check for existing session ID (for download requests)
+    const sessionIdField = Array.isArray(fields.sessionId) ? fields.sessionId[0] : fields.sessionId;
+    let sessionId = sessionIdField || null;
+    
+    console.log(`Processing request - Preview: ${isPreview}, Remove Background: ${shouldRemoveBackground}, Session: ${sessionId}`);
     
     // Grab the images array from the form
     const fileArray = Array.isArray(files.images)
@@ -488,8 +528,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     if (isPreview) {
-      // For preview mode, collect processed images and return as JSON
-      const previewImages: { filename: string; data: string }[] = [];
+      // Generate new session ID for preview
+      sessionId = generateSessionId();
+      
+      // Collect all image data first
+      const allImageData: Array<{ buffer: Buffer; filename: string }> = [];
       
       // Process directly-uploaded images
       for (const f of fileArray) {
@@ -499,16 +542,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         
         try {
           const originalBuffer = fs.readFileSync(filePath);
-          // Process the image but collect as base64 instead of adding to archive
-          const processedBuffer = await processImageForPreview(originalBuffer, shouldRemoveBackground);
-          previewImages.push({
-            filename: outName,
-            data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
+          allImageData.push({
+            buffer: originalBuffer,
+            filename: outName
           });
         } catch (error) {
-          console.error(`Error processing file ${originalFilename}:`, error);
+          console.error(`Error reading file ${originalFilename}:`, error);
           return res.status(400).json({ 
-            error: `Failed to process image`, 
+            error: `Failed to read image file`, 
             failedFile: originalFilename,
             details: error.message 
           });
@@ -541,104 +582,155 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             const arrayBuffer = await response.arrayBuffer();
             const imgBuffer = Buffer.from(arrayBuffer);
             
-            const processedBuffer = await processImageForPreview(imgBuffer, shouldRemoveBackground);
-            previewImages.push({
-              filename,
-              data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
+            allImageData.push({
+              buffer: imgBuffer,
+              filename: filename
             });
           } catch (err) {
-            console.error(`Error processing image from URL ${imageUrl}:`, err);
-            return res.status(400).json({ 
-              error: `Failed to process image from CSV`, 
-              failedFile: filename,
-              details: err.message,
-              imageUrl: imageUrl
-            });
+            console.error(`Error fetching image from URL ${imageUrl}:`, err);
+            // Continue with other images instead of failing completely
+            continue;
           }
         }
       }
       
-      // Return preview images as JSON
-      return res.status(200).json({ images: previewImages });
+      console.log(`Total images to process: ${allImageData.length}`);
+      
+      // Process all images in batches
+      const processedCache = await processImagesInBatches(
+        allImageData,
+        shouldRemoveBackground,
+        (processed, total) => {
+          console.log(`Progress: ${processed}/${total} images processed`);
+        }
+      );
+      
+      // Convert to preview format
+      const previewImages = processedCache.map(item => ({
+        filename: item.filename,
+        data: `data:image/jpeg;base64,${item.buffer.toString('base64')}`
+      }));
+      
+      // Store processed images in cache
+      imageCache.set(sessionId, processedCache);
+      console.log(`Cached ${processedCache.length} processed images for session: ${sessionId}`);
+      
+      // Return preview images as JSON with session ID
+      return res.status(200).json({ 
+        images: previewImages,
+        sessionId: sessionId 
+      });
       
     } else {
-      // Original ZIP download mode
-      res.writeHead(200, {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="SKU-Images-${Date.now()}.zip"`,
-      });
-      const archive = archiver("zip", { zlib: { level: 9 } });
-      archive.on("error", (err) => {
-        throw err;
-      });
-      archive.pipe(res);
-
-      // 1) Process directly-uploaded images (if any)
-      for (const f of fileArray) {
-        const filePath = f.filepath;
-        const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
-        const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
+      // Download mode - check cache first
+      const cachedImages = sessionId ? imageCache.get(sessionId) : null;
+      
+      if (cachedImages && cachedImages.length > 0) {
+        console.log(`Using cached images for session: ${sessionId} (${cachedImages.length} images)`);
         
-        try {
-          const originalBuffer = fs.readFileSync(filePath);
-          await processImageBuffer(originalBuffer, outName, archive, shouldRemoveBackground);
-        } catch (error) {
-          console.error(`Error processing file ${originalFilename}:`, error);
-          return res.status(400).json({ 
-            error: `Failed to process image`, 
-            failedFile: originalFilename,
-            details: error.message 
-          });
-        }
-      }
-
-      // 2) Process the CSV sheet (fetch each image_url, rename as product_sku)
-      if (sheetFile) {
-        const sheetBuffer = fs.readFileSync(sheetFile.filepath);
-        // Convert buffer to string (assuming CSV is UTF-8)
-        const csvString = sheetBuffer.toString("utf8");
-
-        const parsed = Papa.parse(csvString, {
-          header: true,
-          skipEmptyLines: true,
+        // Use cached images for ZIP
+        res.writeHead(200, {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="SKU-Images-${Date.now()}.zip"`,
         });
+        const archive = archiver("zip", { zlib: { level: 9 } });
+        archive.on("error", (err) => {
+          throw err;
+        });
+        archive.pipe(res);
 
-        if (parsed.errors && parsed.errors.length) {
-          console.error("CSV parse errors:", parsed.errors);
+        // Add cached images to ZIP
+        for (const cachedImage of cachedImages) {
+          archive.append(cachedImage.buffer, { name: cachedImage.filename });
         }
 
-        for (const row of parsed.data) {
-          const imageUrl = row["image_url"];
-          const productSku = row["product_sku"];
-          if (!imageUrl || !productSku) continue;
+        await archive.finalize();
+        
+        // Clean up used cache
+        imageCache.delete(sessionId);
+        console.log(`Cleaned up cache for completed session: ${sessionId}`);
+        
+      } else {
+        console.log(`No cache found for session: ${sessionId}, processing from scratch`);
+        
+        // Fallback to original processing (no cache available)
+        res.writeHead(200, {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="SKU-Images-${Date.now()}.zip"`,
+        });
+        const archive = archiver("zip", { zlib: { level: 9 } });
+        archive.on("error", (err) => {
+          throw err;
+        });
+        archive.pipe(res);
 
-          const filename = `${productSku}.jpg`;
+        // 1) Process directly-uploaded images (if any)
+        for (const f of fileArray) {
+          const filePath = f.filepath;
+          const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
+          const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
           
-          // Fetch the image using the updated approach:
           try {
-            const response = await fetch(imageUrl);
-            if (!response.ok) {
-              console.warn(`Failed to fetch ${imageUrl}: ${response.statusText}`);
-              continue;
-            }
-            // Use arrayBuffer() and convert it to a Node.js Buffer:
-            const arrayBuffer = await response.arrayBuffer();
-            const imgBuffer = Buffer.from(arrayBuffer);
-
-            await processImageBuffer(imgBuffer, filename, archive, shouldRemoveBackground);
-          } catch (err) {
-            console.error(`Error processing image from URL ${imageUrl}:`, err);
+            const originalBuffer = fs.readFileSync(filePath);
+            await processImageBuffer(originalBuffer, outName, archive, shouldRemoveBackground);
+          } catch (error) {
+            console.error(`Error processing file ${originalFilename}:`, error);
             return res.status(400).json({ 
-              error: `Failed to process image from CSV`, 
-              failedFile: filename,
-              details: err.message,
-              imageUrl: imageUrl
+              error: `Failed to process image`, 
+              failedFile: originalFilename,
+              details: error.message 
             });
           }
         }
-      }
 
-      await archive.finalize();
+        // 2) Process the CSV sheet (fetch each image_url, rename as product_sku)
+        if (sheetFile) {
+          const sheetBuffer = fs.readFileSync(sheetFile.filepath);
+          // Convert buffer to string (assuming CSV is UTF-8)
+          const csvString = sheetBuffer.toString("utf8");
+
+          const parsed = Papa.parse(csvString, {
+            header: true,
+            skipEmptyLines: true,
+          });
+
+          if (parsed.errors && parsed.errors.length) {
+            console.error("CSV parse errors:", parsed.errors);
+          }
+
+          for (const row of parsed.data) {
+            const imageUrl = row["image_url"];
+            const productSku = row["product_sku"];
+            if (!imageUrl || !productSku) continue;
+
+            const filename = `${productSku}.jpg`;
+            
+            // Fetch the image using the updated approach:
+            try {
+              const response = await fetch(imageUrl);
+              if (!response.ok) {
+                console.warn(`Failed to fetch ${imageUrl}: ${response.statusText}`);
+                continue;
+              }
+              // Use arrayBuffer() and convert it to a Node.js Buffer:
+              const arrayBuffer = await response.arrayBuffer();
+              const imgBuffer = Buffer.from(arrayBuffer);
+
+              await processImageBuffer(imgBuffer, filename, archive, shouldRemoveBackground);
+            } catch (err) {
+              console.error(`Error processing image from URL ${imageUrl}:`, err);
+              return res.status(400).json({ 
+                error: `Failed to process image from CSV`, 
+                failedFile: filename,
+                details: err.message,
+                imageUrl: imageUrl
+              });
+            }
+          }
+        }
+
+        await archive.finalize();
+      }
     }
   } catch (error: any) {
     console.error("Global error:", error);
@@ -787,3 +879,101 @@ async function processImageForPreview(inputBuffer: Buffer, removeBackground: boo
 
   return finalImageBuffer;
 }
+
+/**
+ * Timeout wrapper for production safety
+ */
+async function withTimeout<T>(
+  promise: Promise<T>, 
+  timeoutMs: number, 
+  errorMessage: string
+): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+    )
+  ]);
+}
+
+/**
+ * Process images in batches to avoid timeouts
+ */
+async function processImagesInBatches(
+  imageData: Array<{ buffer: Buffer; filename: string }>,
+  shouldRemoveBackground: boolean,
+  onProgress?: (processed: number, total: number) => void
+): Promise<ProcessedImageCache[]> {
+  const processedImages: ProcessedImageCache[] = [];
+  const total = imageData.length;
+  
+  console.log(`Processing ${total} images in batches of ${BATCH_SIZE}`);
+  
+  // Set timeout based on environment (production is more restrictive)
+  const timeoutPerBatch = IS_PRODUCTION ? 120000 : 300000; // 2 min vs 5 min per batch
+  
+  // Process in batches
+  for (let i = 0; i < imageData.length; i += BATCH_SIZE) {
+    const batch = imageData.slice(i, i + BATCH_SIZE);
+    const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(total / BATCH_SIZE);
+    
+    console.log(`Processing batch ${batchNumber}/${totalBatches} (${batch.length} images)`);
+    
+    try {
+      // Process batch with timeout protection
+      const batchPromise = Promise.all(
+        batch.map(async (item, index) => {
+          try {
+            // Add small delay to prevent overwhelming the server
+            await new Promise(resolve => setTimeout(resolve, index * 100));
+            
+            const processedBuffer = await processImageForPreview(item.buffer, shouldRemoveBackground);
+            return {
+              buffer: processedBuffer,
+              filename: item.filename,
+              timestamp: Date.now()
+            };
+          } catch (error) {
+            console.error(`Failed to process ${item.filename}:`, error);
+            // Return original image if processing fails
+            return {
+              buffer: await sharp(item.buffer).jpeg({ quality: 90 }).toBuffer(),
+              filename: item.filename,
+              timestamp: Date.now()
+            };
+          }
+        })
+      );
+      
+      const batchResults = await withTimeout(
+        batchPromise,
+        timeoutPerBatch,
+        `Batch ${batchNumber} timed out after ${timeoutPerBatch/1000} seconds`
+      );
+      
+      processedImages.push(...batchResults);
+      
+      // Report progress
+      if (onProgress) {
+        onProgress(processedImages.length, total);
+      }
+      
+      console.log(`Completed batch ${batchNumber}/${totalBatches} - ${processedImages.length}/${total} images processed`);
+      
+      // Force garbage collection in production to manage memory
+      if (IS_PRODUCTION && global.gc) {
+        global.gc();
+      }
+      
+    } catch (error) {
+      console.error(`Batch ${batchNumber} failed:`, error);
+      // Continue with other batches even if one fails
+      continue;
+    }
+  }
+  
+  console.log(`Completed processing: ${processedImages.length}/${total} images successfully processed`);
+  return processedImages;
+}
+

@@ -436,9 +436,15 @@ function FootwearAligner() {
   // Preview states
   const [previewImages, setPreviewImages] = useState<Array<{filename: string; data: string}>>([]);
   const [showPreview, setShowPreview] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   // Handle file selection with AVIF conversion and PNG transparency processing
   const handleFilesSelected = async (files: File[]) => {
+    // Clear previous session when new files are selected
+    setSessionId(null);
+    setPreviewImages([]);
+    setShowPreview(false);
+    
     // Check if any files need processing
     const hasImages = files.some(file => file.type.startsWith('image/'));
     const hasAvif = files.some(file => 
@@ -586,6 +592,7 @@ function FootwearAligner() {
       if (res.data && res.data.images && Array.isArray(res.data.images)) {
         setPreviewImages(res.data.images);
         setShowPreview(true);
+        setSessionId(res.data.sessionId);
         setMessage(`${res.data.images.length} images processed successfully!`);
       } else {
         setMessage("Invalid response format from server");
@@ -630,6 +637,13 @@ function FootwearAligner() {
     // Build your FormData
     const formData = new FormData();
     formData.append("removeBackground", removeBackground.toString()); // Add background removal setting
+    
+    // Add session ID if available for cache optimization
+    if (sessionId) {
+      formData.append("sessionId", sessionId);
+      console.log(`Using cached results from session: ${sessionId}`);
+    }
+    
     if (selectedImages.length > 0) {
       selectedImages.forEach((file) => {
         formData.append("images", file);
@@ -716,7 +730,7 @@ function FootwearAligner() {
 
   const closePreview = () => {
     setShowPreview(false);
-    setPreviewImages([]);
+    // Don't clear previewImages or sessionId - keep cache available for download
   };
 
   return (
@@ -828,7 +842,9 @@ function FootwearAligner() {
                   )}
                   {stage === "processing" && (
                     <p className="mt-2 text-center text-gray-700">
-                      Processing on server, please wait...
+                      {sessionId 
+                        ? "Using cached results for super-fast download..." 
+                        : "Processing on server, please wait..."}
                     </p>
                   )}
                   {stage === "downloading" && (
