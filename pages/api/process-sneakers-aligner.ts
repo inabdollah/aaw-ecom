@@ -45,6 +45,22 @@ function isBackgroundPixel(r: number, g: number, b: number): boolean {
  * Processes an image buffer and appends the final JPEG image to the ZIP archive.
  */
 async function processImageBuffer(inputBuffer: Buffer, filename: string, archive: archiver.Archiver) {
+  // First, check the dimensions of the input image and resize if needed
+  const inputImage = sharp(inputBuffer);
+  const metadata = await inputImage.metadata();
+  
+  let processedInputBuffer = inputBuffer;
+  
+  // If the image is larger than 2000x2000, resize it to fit
+  if (metadata.width && metadata.height && (metadata.width > 2000 || metadata.height > 2000)) {
+    processedInputBuffer = await inputImage
+      .resize(2000, 2000, {
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .toBuffer();
+  }
+  
   // Create a 2000×2000 canvas and composite the input image in the center.
   const composedBuffer = await sharp({
     create: {
@@ -54,7 +70,7 @@ async function processImageBuffer(inputBuffer: Buffer, filename: string, archive
       background: { r: 255, g: 255, b: 255, alpha: 1 },
     },
   })
-    .composite([{ input: inputBuffer, gravity: "center" }])
+    .composite([{ input: processedInputBuffer, gravity: "center" }])
     .png() // Keep as PNG for processing
     .toBuffer();
 
@@ -151,7 +167,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const form = formidable({ multiples: true });
-    const { files } = await new Promise<{
+    const { files, fields } = await new Promise<{
       files: formidable.Files;
       fields: formidable.Fields;
     }>((resolve, reject) => {
@@ -161,6 +177,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     });
 
+    // Check if this is a preview request
+    const previewField = Array.isArray(fields.preview) ? fields.preview[0] : fields.preview;
+    const isPreview = previewField === 'true' || previewField === true;
+    
     // Grab the images array from the form
     const fileArray = Array.isArray(files.images)
       ? files.images
@@ -173,70 +193,248 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       sheetFile = Array.isArray(files.sheet) ? files.sheet[0] : files.sheet;
     }
 
-    // Prepare ZIP response
-    res.writeHead(200, {
-      "Content-Type": "application/zip",
-      "Content-Disposition": `attachment; filename="SKU-Images-${Date.now()}.zip"`,
-    });
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (err) => {
-      throw err;
-    });
-    archive.pipe(res);
-
-    // 1) Process directly-uploaded images (if any)
-    for (const f of fileArray) {
-      const filePath = f.filepath;
-      const originalBuffer = fs.readFileSync(filePath);
-      // Ensure the filename has a .jpg extension
-      const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
-      const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
-      await processImageBuffer(originalBuffer, outName, archive);
-    }
-
-    // 2) Process the CSV sheet (fetch each image_url, rename as product_sku)
-if (sheetFile) {
-  const sheetBuffer = fs.readFileSync(sheetFile.filepath);
-  // Convert buffer to string (assuming CSV is UTF-8)
-  const csvString = sheetBuffer.toString("utf8");
-
-  const parsed = Papa.parse(csvString, {
-    header: true,
-    skipEmptyLines: true,
-  });
-
-  if (parsed.errors && parsed.errors.length) {
-    console.error("CSV parse errors:", parsed.errors);
-  }
-
-  for (const row of parsed.data) {
-    const imageUrl = row["image_url"];
-    const productSku = row["product_sku"];
-    if (!imageUrl || !productSku) continue;
-
-    // Fetch the image using the updated approach:
-    try {
-      const response = await fetch(imageUrl);
-      if (!response.ok) {
-        console.warn(`Failed to fetch ${imageUrl}: ${response.statusText}`);
-        continue;
+    if (isPreview) {
+      // For preview mode, collect processed images and return as JSON
+      const previewImages: { filename: string; data: string }[] = [];
+      
+      // Process directly-uploaded images
+      for (const f of fileArray) {
+        const filePath = f.filepath;
+        const originalBuffer = fs.readFileSync(filePath);
+        const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
+        const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
+        
+        // Process the image but collect as base64 instead of adding to archive
+        const processedBuffer = await processImageForPreview(originalBuffer);
+        previewImages.push({
+          filename: outName,
+          data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
+        });
       }
-      // Use arrayBuffer() and convert it to a Node.js Buffer:
-      const arrayBuffer = await response.arrayBuffer();
-      const imgBuffer = Buffer.from(arrayBuffer);
+      
+      // Process CSV sheet images
+      if (sheetFile) {
+        const sheetBuffer = fs.readFileSync(sheetFile.filepath);
+        const csvString = sheetBuffer.toString("utf8");
+        
+        const parsed = Papa.parse(csvString, {
+          header: true,
+          skipEmptyLines: true,
+        });
+        
+        for (const row of parsed.data) {
+          const imageUrl = row["image_url"];
+          const productSku = row["product_sku"];
+          if (!imageUrl || !productSku) continue;
+          
+          try {
+            const response = await fetch(imageUrl);
+            if (!response.ok) {
+              console.warn(`Failed to fetch ${imageUrl}: ${response.statusText}`);
+              continue;
+            }
+            const arrayBuffer = await response.arrayBuffer();
+            const imgBuffer = Buffer.from(arrayBuffer);
+            
+            const filename = `${productSku}.jpg`;
+            const processedBuffer = await processImageForPreview(imgBuffer);
+            previewImages.push({
+              filename,
+              data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
+            });
+          } catch (err) {
+            console.error("Error fetching image URL:", err);
+          }
+        }
+      }
+      
+      // Return preview images as JSON
+      return res.status(200).json({ images: previewImages });
+      
+    } else {
+      // Original ZIP download mode
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="SKU-Images-${Date.now()}.zip"`,
+      });
+      const archive = archiver("zip", { zlib: { level: 9 } });
+      archive.on("error", (err) => {
+        throw err;
+      });
+      archive.pipe(res);
 
-      // Use the product SKU for the filename with a .jpg extension
-      const filename = `${productSku}.jpg`;
-      await processImageBuffer(imgBuffer, filename, archive);
-    } catch (err) {
-      console.error("Error fetching image URL:", err);
+      // 1) Process directly-uploaded images (if any)
+      for (const f of fileArray) {
+        const filePath = f.filepath;
+        const originalBuffer = fs.readFileSync(filePath);
+        // Ensure the filename has a .jpg extension
+        const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
+        const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
+        await processImageBuffer(originalBuffer, outName, archive);
+      }
+
+      // 2) Process the CSV sheet (fetch each image_url, rename as product_sku)
+      if (sheetFile) {
+        const sheetBuffer = fs.readFileSync(sheetFile.filepath);
+        // Convert buffer to string (assuming CSV is UTF-8)
+        const csvString = sheetBuffer.toString("utf8");
+
+        const parsed = Papa.parse(csvString, {
+          header: true,
+          skipEmptyLines: true,
+        });
+
+        if (parsed.errors && parsed.errors.length) {
+          console.error("CSV parse errors:", parsed.errors);
+        }
+
+        for (const row of parsed.data) {
+          const imageUrl = row["image_url"];
+          const productSku = row["product_sku"];
+          if (!imageUrl || !productSku) continue;
+
+          // Fetch the image using the updated approach:
+          try {
+            const response = await fetch(imageUrl);
+            if (!response.ok) {
+              console.warn(`Failed to fetch ${imageUrl}: ${response.statusText}`);
+              continue;
+            }
+            // Use arrayBuffer() and convert it to a Node.js Buffer:
+            const arrayBuffer = await response.arrayBuffer();
+            const imgBuffer = Buffer.from(arrayBuffer);
+
+            // Use the product SKU for the filename with a .jpg extension
+            const filename = `${productSku}.jpg`;
+            await processImageBuffer(imgBuffer, filename, archive);
+          } catch (err) {
+            console.error("Error fetching image URL:", err);
+          }
+        }
+      }
+
+      await archive.finalize();
     }
-  }
-}
-
-    await archive.finalize();
   } catch (error: any) {
     console.error(error);
     res.status(500).json({ error: error.message });
   }
+}
+
+/**
+ * Process image for preview mode - returns the processed image as a buffer
+ */
+async function processImageForPreview(inputBuffer: Buffer): Promise<Buffer> {
+  // First, check the dimensions of the input image and resize if needed
+  const inputImage = sharp(inputBuffer);
+  const metadata = await inputImage.metadata();
+  
+  let processedInputBuffer = inputBuffer;
+  
+  // If the image is larger than 2000x2000, resize it to fit
+  if (metadata.width && metadata.height && (metadata.width > 2000 || metadata.height > 2000)) {
+    processedInputBuffer = await inputImage
+      .resize(2000, 2000, {
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .toBuffer();
+  }
+  
+  // Create a 2000×2000 canvas and composite the input image in the center.
+  const composedBuffer = await sharp({
+    create: {
+      width: 2000,
+      height: 2000,
+      channels: 4,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    },
+  })
+    .composite([{ input: processedInputBuffer, gravity: "center" }])
+    .png() // Keep as PNG for processing
+    .toBuffer();
+
+  let image = sharp(composedBuffer).ensureAlpha();
+  const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
+  const { width, height, channels } = info;
+
+  let minX = width,
+    minY = height,
+    maxX = 0,
+    maxY = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * channels;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      if (!isBackgroundPixel(r, g, b)) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX || maxY < minY) {
+    minX = 0; minY = 0; maxX = width - 1; maxY = height - 1;
+  }
+
+  const originalMinX = minX;
+  const originalProductBottom = maxY;
+
+  let cropW = maxX - minX;
+  let cropH = maxY - minY;
+  const marginX = Math.round(0.1 * cropW);
+  const marginY = Math.round(0.1 * cropH);
+
+  maxY = Math.min(height - 1, maxY + marginY);
+  minX = Math.max(0, minX - marginX);
+  minY = Math.max(0, minY - marginY);
+  cropW = maxX - minX + 1;
+  cropH = maxY - minY + 1;
+
+  const productBottomOffset = originalProductBottom - minY;
+  const productCenterX = (originalMinX + maxX) / 2 - minX;
+
+  image = sharp(composedBuffer).extract({
+    left: minX,
+    top: minY,
+    width: cropW,
+    height: cropH,
+  });
+
+  const targetProductWidth = 700;
+  let scaleFactor = targetProductWidth / cropW;
+  let resizedWidth = targetProductWidth;
+  let resizedHeight = Math.round(cropH * scaleFactor);
+  if (resizedHeight > 800) {
+    scaleFactor = 800 / cropH;
+    resizedWidth = Math.round(cropW * scaleFactor);
+    resizedHeight = 800;
+  }
+  const resizedBuffer = await image.resize(resizedWidth, resizedHeight).toBuffer();
+
+  const resizedProductCenterX = productCenterX * scaleFactor;
+  const resizedProductBottomOffset = Math.round(productBottomOffset * scaleFactor);
+
+  const canvasWidth = 800;
+  const canvasHeight = 800;
+  const leftX = Math.floor(canvasWidth / 2 - resizedProductCenterX);
+  const topY = canvasHeight - 212 - resizedProductBottomOffset;
+
+  // Create final canvas and composite the resized image.
+  const finalImageBuffer = await sharp({
+    create: {
+      width: canvasWidth,
+      height: canvasHeight,
+      channels: 3, // JPEG does not support alpha
+      background: { r: 255, g: 255, b: 255 },
+    },
+  })
+    .composite([{ input: resizedBuffer, left: leftX, top: topY }])
+    .jpeg({ quality: 90 })
+    .toBuffer();
+
+  return finalImageBuffer;
 }

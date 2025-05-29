@@ -1,4 +1,4 @@
-// pages/footwear-aligner.tsx
+// pages/pharma-aligner.tsx
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/ban-ts-comment */
@@ -63,7 +63,7 @@ const FilePicker = ({
   );
 };
 
-function FootwearAligner() {
+function PharmaAligner() {
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [selectedSheet, setSelectedSheet] = useState<File | null>(null);
   const [message, setMessage] = useState("");
@@ -74,68 +74,14 @@ function FootwearAligner() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   // "idle" | "uploading" | "processing" | "downloading"
   const [stage, setStage] = useState<"idle" | "uploading" | "processing" | "downloading">("idle");
-  
-  // Preview states
-  const [previewImages, setPreviewImages] = useState<Array<{filename: string; data: string}>>([]);
-  const [showPreview, setShowPreview] = useState(false);
 
-  const handlePreview = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedImages.length === 0 && !selectedSheet) {
       setMessage("Please upload images or a sheet before processing.");
       return;
     }
 
-    setLoading(true);
-    setMessage("");
-    setStage("uploading");
-    setUploadProgress(0);
-
-    // Build your FormData
-    const formData = new FormData();
-    formData.append("preview", "true"); // Add preview flag
-    if (selectedImages.length > 0) {
-      selectedImages.forEach((file) => {
-        formData.append("images", file);
-      });
-    }
-    if (selectedSheet) {
-      formData.append("sheet", selectedSheet);
-    }
-
-    try {
-      const res = await axios.post("/api/process-sneakers-aligner", formData, {
-        onUploadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const percentComplete = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            setUploadProgress(percentComplete);
-            if (percentComplete === 100) {
-              setStage("processing");
-            }
-          }
-        },
-      });
-
-      // Add validation for the response
-      if (res.data && res.data.images && Array.isArray(res.data.images)) {
-        setPreviewImages(res.data.images);
-        setShowPreview(true);
-        setMessage(`${res.data.images.length} images processed successfully!`);
-      } else {
-        setMessage("Invalid response format from server");
-        console.error("Invalid response:", res.data);
-      }
-    } catch (err: any) {
-      setMessage(`Processing failed: ${err.response?.data?.error || err.message}`);
-      console.error("Preview error:", err);
-    } finally {
-      setLoading(false);
-      setStage("idle");
-      setUploadProgress(0);
-    }
-  };
-
-  const handleDownload = async () => {
     setLoading(true);
     setMessage("");
     setStage("uploading");
@@ -154,7 +100,7 @@ function FootwearAligner() {
     }
 
     try {
-      const res = await axios.post("/api/process-sneakers-aligner", formData, {
+      const res = await axios.post("/api/process-pharma-aligner", formData, {
         responseType: "blob",
         onUploadProgress: (progressEvent) => {
           if (progressEvent.total) {
@@ -193,18 +139,13 @@ function FootwearAligner() {
       window.URL.revokeObjectURL(url);
       setMessage("Download started!");
     } catch (err: any) {
-      setMessage(`Download failed: ${err.message}`);
+      setMessage(`Upload failed: ${err.message}`);
     } finally {
       setLoading(false);
       setStage("idle");
       setUploadProgress(0);
       setDownloadProgress(0);
     }
-  };
-
-  const closePreview = () => {
-    setShowPreview(false);
-    setPreviewImages([]);
   };
 
   return (
@@ -221,7 +162,7 @@ function FootwearAligner() {
         <div className="max-w-lg w-full p-6">
           <div className="bg-white rounded shadow p-6">
             <h2 className="text-xl font-bold mb-4 text-gray-800">Upload Options</h2>
-            <form onSubmit={handlePreview} className="space-y-6">
+            <form onSubmit={handleSubmit} className="space-y-6">
               {/* Images Dropzone */}
               <div>
                 <label className="font-semibold text-gray-700 mb-2 block">
@@ -265,9 +206,9 @@ function FootwearAligner() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded shadow disabled:opacity-50"
+                className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded shadow disabled:opacity-50"
               >
-                {loading ? "Processing..." : "Preview Images"}
+                {loading ? "Processing..." : "Process"}
               </button>
 
               {/* Progress Indicators */}
@@ -278,7 +219,7 @@ function FootwearAligner() {
                       <p className="mb-1">Uploading: {uploadProgress}%</p>
                       <div className="w-full bg-gray-200 rounded h-2">
                         <div
-                          className="bg-blue-500 h-2 rounded"
+                          className="bg-green-500 h-2 rounded"
                           style={{ width: `${uploadProgress}%` }}
                         />
                       </div>
@@ -294,7 +235,7 @@ function FootwearAligner() {
                       <p className="mb-1">Downloading: {downloadProgress}%</p>
                       <div className="w-full bg-gray-200 rounded h-2">
                         <div
-                          className="bg-green-500 h-2 rounded"
+                          className="bg-blue-500 h-2 rounded"
                           style={{ width: `${downloadProgress}%` }}
                         />
                       </div>
@@ -313,75 +254,8 @@ function FootwearAligner() {
           </div>
         </div>
       </main>
-
-      {/* Preview Modal */}
-      {showPreview && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-6xl w-full max-h-[90vh] overflow-hidden">
-            {/* Modal Header */}
-            <div className="p-4 border-b flex justify-between items-center">
-              <h3 className="text-xl font-bold">Preview Processed Images</h3>
-              <button
-                onClick={closePreview}
-                className="text-gray-500 hover:text-gray-700"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            {/* Modal Body */}
-            <div className="p-4 overflow-y-auto max-h-[calc(90vh-200px)]">
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {previewImages && previewImages.length > 0 ? (
-                  previewImages.map((image, index) => (
-                    <div key={index} className="flex flex-col">
-                      <div className="relative w-full h-48 bg-gray-100 rounded overflow-hidden">
-                        <img
-                          src={image.data}
-                          alt={image.filename}
-                          className="absolute inset-0 w-full h-full object-contain"
-                        />
-                        <img
-                          src="/guides.png"
-                          alt="Guide overlay"
-                          className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-                          style={{ mixBlendMode: 'multiply', opacity: 0.5 }}
-                        />
-                      </div>
-                      <p className="text-sm text-gray-600 mt-1 truncate" title={image.filename}>
-                        {image.filename}
-                      </p>
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-center text-gray-500">No images to preview</p>
-                )}
-              </div>
-            </div>
-
-            {/* Modal Footer */}
-            <div className="p-4 border-t flex justify-end space-x-4">
-              <button
-                onClick={closePreview}
-                className="px-4 py-2 text-gray-600 hover:text-gray-800"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDownload}
-                disabled={loading}
-                className="px-6 py-2 bg-green-500 hover:bg-green-600 text-white font-bold rounded shadow disabled:opacity-50"
-              >
-                {loading ? "Downloading..." : "Download All as ZIP"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-export default FootwearAligner;
+export default PharmaAligner;
