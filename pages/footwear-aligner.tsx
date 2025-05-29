@@ -228,13 +228,17 @@ async function pngHasTransparency(file: File): Promise<boolean> {
 // Function to remove background using AI
 async function removeBackgroundWithAI(file: File): Promise<File> {
   try {
+    console.log(`Starting AI background removal for: ${file.name}, size: ${file.size} bytes`);
+    
     // Dynamically import the background removal library
     const { removeBackground: aiRemoveBackground } = await import('@imgly/background-removal');
     
-    console.log(`Removing background for: ${file.name}`);
+    console.log(`AI library loaded, processing: ${file.name}`);
     
     // Remove background using AI
     const imageWithoutBackground = await aiRemoveBackground(file);
+    
+    console.log(`AI processing complete for: ${file.name}, result type:`, typeof imageWithoutBackground);
     
     // Convert the result to a File object
     const processedFile = new File(
@@ -243,11 +247,16 @@ async function removeBackgroundWithAI(file: File): Promise<File> {
       { type: 'image/png' }
     );
     
-    console.log(`Successfully removed background for: ${file.name}`);
+    console.log(`Successfully removed background for: ${file.name}, new size: ${processedFile.size} bytes`);
     return processedFile;
     
   } catch (error) {
-    console.warn('AI background removal failed:', error);
+    console.error('AI background removal failed with error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
     throw error;
   }
 }
@@ -455,15 +464,23 @@ async function processFiles(files: File[], shouldRemoveBackground: boolean): Pro
     let currentFile = file;
     if (file.type.startsWith('image/') && shouldRemoveBackground) {
       try {
+        console.log(`=== Processing image: ${file.name} ===`);
+        console.log(`File type: ${file.type}, Should remove background: ${shouldRemoveBackground}`);
         console.log(`Removing background for: ${file.name}`);
         const fileWithoutBg = await removeBackgroundWithAI(file);
+        console.log(`Background removed, adding white background for: ${file.name}`);
         // Add white background to the image after background removal
         currentFile = await addWhiteBackground(fileWithoutBg);
         console.log(`Successfully processed background for: ${file.name}`);
+        console.log(`=== Completed processing: ${file.name} ===`);
       } catch (error) {
+        console.error(`=== Background removal failed for ${file.name} ===`);
+        console.error('Error details:', error);
         console.warn(`Background removal failed for ${file.name}:`, error);
         currentFile = file; // Keep original if background removal fails
       }
+    } else {
+      console.log(`Skipping background removal for: ${file.name} (type: ${file.type}, shouldRemove: ${shouldRemoveBackground})`);
     }
     
     // Step 2: Handle specific format conversions
@@ -529,7 +546,7 @@ function FootwearAligner() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [convertingAvif, setConvertingAvif] = useState(false);
-  const [removeBackground, setRemoveBackground] = useState(false);
+  const [removeBackground, setRemoveBackground] = useState(true);
 
   // Progress states for upload/download
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -845,12 +862,12 @@ function FootwearAligner() {
                     onChange={(e) => setRemoveBackground(e.target.checked)}
                     className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                   />
-                  <span>Enable AI Background Removal (slower)</span>
+                  <span>AI Background Removal</span>
                 </label>
                 <p className="text-xs text-gray-500 mt-1">
                   {removeBackground 
-                    ? "AI will remove backgrounds from all images. This may take longer to process." 
-                    : "Images will be processed with simple transparency handling and format conversion only (faster)."}
+                    ? "✅ AI will remove backgrounds to show only the footwear. Processing will take longer but results are better." 
+                    : "⚠️ Only basic format conversion and transparency handling (faster but backgrounds may remain)."}
                 </p>
               </div>
 
