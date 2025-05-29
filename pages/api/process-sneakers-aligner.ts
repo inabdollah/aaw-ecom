@@ -12,6 +12,8 @@ import sharp from "sharp";
 import fetch from "node-fetch";
 import Papa from "papaparse"; // yarn add papaparse (or npm i papaparse)
 import fs from "fs";
+import path from "path";
+import os from "os";
 
 // Server-side background removal
 let removeBackgroundNode: any = null;
@@ -166,14 +168,50 @@ async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> 
       throw new Error('Background removal library not available');
     }
     
-    // Remove background
-    const blob = await removeBackgroundNode(inputBuffer);
+    // First, ensure the buffer is a proper image format
+    console.log('Converting input to proper JPEG format...');
+    const jpegBuffer = await sharp(inputBuffer)
+      .jpeg({ quality: 95 })
+      .toBuffer();
     
-    // Convert blob to buffer
-    const result = Buffer.from(await blob.arrayBuffer());
-    
-    console.log('Server-side background removal completed');
-    return result;
+    // Try multiple approaches
+    try {
+      // Approach 1: Try direct buffer
+      console.log('Trying direct buffer approach...');
+      const blob = await removeBackgroundNode(jpegBuffer);
+      const result = Buffer.from(await blob.arrayBuffer());
+      console.log('Server-side background removal completed (direct buffer)');
+      return result;
+    } catch (directError) {
+      console.log('Direct buffer failed, trying file approach...', directError.message);
+      
+      // Approach 2: Use temporary file
+      const tempInputPath = path.join(os.tmpdir(), `input_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`);
+      
+      try {
+        // Write the properly formatted JPEG to temp file
+        fs.writeFileSync(tempInputPath, jpegBuffer);
+        
+        console.log('Trying file path approach with JPEG:', tempInputPath);
+        
+        // Remove background using file path
+        const blob = await removeBackgroundNode(tempInputPath);
+        const result = Buffer.from(await blob.arrayBuffer());
+        
+        console.log('Server-side background removal completed (file approach)');
+        return result;
+        
+      } finally {
+        // Clean up temporary file
+        try {
+          if (fs.existsSync(tempInputPath)) {
+            fs.unlinkSync(tempInputPath);
+          }
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup temp file:', cleanupError);
+        }
+      }
+    }
     
   } catch (error) {
     console.error('Server-side background removal failed:', error);
