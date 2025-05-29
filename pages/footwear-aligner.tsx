@@ -425,7 +425,7 @@ function FootwearAligner() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [convertingAvif, setConvertingAvif] = useState(false);
-  const [removeBackground, setRemoveBackground] = useState(true);
+  const [removeBackground, setRemoveBackground] = useState(false);
 
   // Progress states for upload/download
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -759,15 +759,12 @@ function FootwearAligner() {
                     onChange={(e) => setRemoveBackground(e.target.checked)}
                     className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                   />
-                  <span>AI Background Removal</span>
+                  <span>AI Grey Background Removal (under development)</span>
                 </label>
               </div>
 
               {/* Images Dropzone */}
               <div>
-                <label className="font-semibold text-gray-700 mb-2 block">
-                  Upload Individual Images
-                </label>
                 <FilePicker
                   accept={{ 
                     "image/*": [".jpeg", ".jpg", ".png", ".gif", ".avif", ".webp"],
@@ -787,11 +784,6 @@ function FootwearAligner() {
                     {selectedImages.length} image(s) selected.
                   </p>
                 )}
-                <p className="text-xs text-gray-500 mt-1">
-                  {removeBackground 
-                    ? "Background removal will be handled on the server for optimal performance. AVIF files will be converted to JPEG if your browser supports AVIF."
-                    : "AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails."}
-                </p>
               </div>
 
               {/* Sheet Dropzone */}
