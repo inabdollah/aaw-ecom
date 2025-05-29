@@ -80,13 +80,13 @@ async function convertToJpeg(inputBuffer: Buffer): Promise<Buffer> {
       console.log(`Adding white background to ${metadata.format} with alpha channel`);
       return await image
         .flatten({ background: { r: 255, g: 255, b: 255 } }) // Add white background
-        .jpeg({ quality: 95 })
+        .jpeg({ quality: 98, chromaSubsampling: '4:4:4' }) // High quality, no color compression
         .toBuffer();
     }
     
-    // For other formats, convert directly to JPEG
+    // For other formats, convert directly to JPEG with high quality
     return await image
-      .jpeg({ quality: 95 })
+      .jpeg({ quality: 98, chromaSubsampling: '4:4:4' }) // High quality, no color compression
       .toBuffer();
   } catch (error) {
     // Check if this is an AVIF-specific error
@@ -155,6 +155,95 @@ async function addWhiteBackgroundToWebp(inputBuffer: Buffer): Promise<Buffer> {
 }
 
 /**
+ * Add an artificial shadow under the sneaker after background removal
+ */
+async function addArtificialShadow(inputBuffer: Buffer): Promise<Buffer> {
+  try {
+    console.log('Adding artificial shadow under sneaker...');
+    
+    const image = sharp(inputBuffer);
+    const metadata = await image.metadata();
+    
+    if (!metadata.width || !metadata.height) {
+      return inputBuffer;
+    }
+    
+    // Analyze the image to find the sneaker bounds
+    const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
+    const { width, height, channels } = info;
+    
+    // Find the actual sneaker boundaries
+    let minX = width, maxX = 0, maxY = 0;
+    
+    // Scan for non-transparent pixels to find sneaker bounds
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (y * width + x) * channels;
+        const alpha = channels === 4 ? data[idx + 3] : 255; // Check alpha channel
+        
+        if (alpha > 50) { // Non-transparent pixel (part of sneaker)
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y; // Find bottom of sneaker
+        }
+      }
+    }
+    
+    // Calculate shadow dimensions based on actual sneaker
+    const sneakerWidth = Math.max(maxX - minX, 100); // Minimum 100px width
+    const sneakerCenterX = (minX + maxX) / 2;
+    
+    // Shadow should be slightly wider than sneaker, thinner, and darker
+    const shadowWidth = Math.floor(sneakerWidth * 1.1); // 110% of sneaker width (reduced from 120%)
+    const shadowHeight = Math.floor(shadowWidth * 0.04); // Very thin - 4% of width (reduced from 8%)
+    const shadowX = Math.floor(sneakerCenterX - shadowWidth / 2); // Center under sneaker
+    const shadowY = Math.floor(maxY - shadowHeight * 0.8); // Move shadow up more - sneaker covers 80% of shadow
+    
+    // Create very subtle, thin shadow as SVG with increased darkness
+    const shadowSvg = `
+      <svg width="${metadata.width}" height="${metadata.height}">
+        <defs>
+          <radialGradient id="shadow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" style="stop-color:rgba(0,0,0,0.45);stop-opacity:1" />
+            <stop offset="60%" style="stop-color:rgba(0,0,0,0.2);stop-opacity:1" />
+            <stop offset="100%" style="stop-color:rgba(0,0,0,0);stop-opacity:0" />
+          </radialGradient>
+        </defs>
+        <ellipse cx="${shadowX + shadowWidth/2}" cy="${shadowY + shadowHeight/2}" 
+                 rx="${shadowWidth/2}" ry="${shadowHeight/2}" 
+                 fill="url(#shadow)" />
+      </svg>
+    `;
+    
+    // Convert SVG to buffer
+    const shadowBuffer = Buffer.from(shadowSvg);
+    
+    // Create white background with shadow
+    const backgroundWithShadow = await sharp({
+      create: {
+        width: metadata.width,
+        height: metadata.height,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 1 }
+      }
+    })
+    .composite([
+      { input: shadowBuffer, top: 0, left: 0 }, // Add shadow first
+      { input: inputBuffer, top: 0, left: 0 }   // Then add sneaker on top
+    ])
+    .png()
+    .toBuffer();
+    
+    console.log(`Artificial shadow added: width=${shadowWidth}px, height=${shadowHeight}px, position=(${shadowX}, ${shadowY})`);
+    return backgroundWithShadow;
+    
+  } catch (error) {
+    console.warn('Failed to add artificial shadow, using original:', error);
+    return inputBuffer;
+  }
+}
+
+/**
  * Remove background using server-side AI
  */
 async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> {
@@ -171,13 +260,13 @@ async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> 
     // First, ensure the buffer is a proper image format
     console.log('Converting input to proper JPEG format...');
     const jpegBuffer = await sharp(inputBuffer)
-      .jpeg({ quality: 95 })
+      .jpeg({ quality: 98, chromaSubsampling: '4:4:4' }) // High quality for AI processing
       .toBuffer();
     
-    // Try multiple approaches
+    // Try multiple approaches - using default settings for maximum background removal
     try {
-      // Approach 1: Try direct buffer
-      console.log('Trying direct buffer approach...');
+      // Approach 1: Try direct buffer (default aggressive settings)
+      console.log('Trying direct buffer approach with default aggressive settings...');
       const blob = await removeBackgroundNode(jpegBuffer);
       const result = Buffer.from(await blob.arrayBuffer());
       console.log('Server-side background removal completed (direct buffer)');
@@ -185,7 +274,7 @@ async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> 
     } catch (directError) {
       console.log('Direct buffer failed, trying file approach...', directError.message);
       
-      // Approach 2: Use temporary file
+      // Approach 2: Use temporary file (default aggressive settings)
       const tempInputPath = path.join(os.tmpdir(), `input_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`);
       
       try {
@@ -194,7 +283,7 @@ async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> 
         
         console.log('Trying file path approach with JPEG:', tempInputPath);
         
-        // Remove background using file path
+        // Remove background using file path (default settings)
         const blob = await removeBackgroundNode(tempInputPath);
         const result = Buffer.from(await blob.arrayBuffer());
         
@@ -231,6 +320,10 @@ async function processImageBuffer(inputBuffer: Buffer, filename: string, archive
       console.log(`Removing background for: ${filename}`);
       processedBuffer = await removeBackgroundServerSide(inputBuffer);
       console.log(`Background removed for: ${filename}`);
+      
+      // Add artificial shadow after background removal
+      processedBuffer = await addArtificialShadow(processedBuffer);
+      console.log(`Artificial shadow added for: ${filename}`);
     } catch (error) {
       console.warn(`Background removal failed for ${filename}, continuing with original:`, error);
       processedBuffer = inputBuffer;
@@ -348,7 +441,7 @@ async function processImageBuffer(inputBuffer: Buffer, filename: string, archive
     },
   })
     .composite([{ input: resizedBuffer, left: leftX, top: topY }])
-    .jpeg({ quality: 90 })
+    .jpeg({ quality: 95, chromaSubsampling: '4:4:4' }) // High quality output, no color compression
     .toBuffer();
 
   // Append the JPEG image to the ZIP archive.
@@ -568,6 +661,10 @@ async function processImageForPreview(inputBuffer: Buffer, removeBackground: boo
       console.log('Removing background for preview image');
       processedBuffer = await removeBackgroundServerSide(inputBuffer);
       console.log('Background removed for preview image');
+      
+      // Add artificial shadow after background removal
+      processedBuffer = await addArtificialShadow(processedBuffer);
+      console.log('Artificial shadow added for preview image');
     } catch (error) {
       console.warn('Background removal failed for preview, continuing with original:', error);
       processedBuffer = inputBuffer;
@@ -685,7 +782,7 @@ async function processImageForPreview(inputBuffer: Buffer, removeBackground: boo
     },
   })
     .composite([{ input: resizedBuffer, left: leftX, top: topY }])
-    .jpeg({ quality: 90 })
+    .jpeg({ quality: 95, chromaSubsampling: '4:4:4' }) // High quality output, no color compression
     .toBuffer();
 
   return finalImageBuffer;
