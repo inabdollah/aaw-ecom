@@ -29,21 +29,28 @@ const imageCache = new Map<string, ProcessedImageCache[]>();
 
 // Configuration for production optimization
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const BATCH_SIZE = IS_PRODUCTION ? 5 : 10; // Smaller batches in production
-const MAX_CONCURRENT = IS_PRODUCTION ? 2 : 3; // Fewer concurrent operations in production
+const BATCH_SIZE = IS_PRODUCTION ? 1 : 5; // Process 1 image at a time in production to avoid memory issues
+const MAX_CONCURRENT = 1; // Always sequential to prevent memory exhaustion
 const CACHE_EXPIRY = IS_PRODUCTION ? 10 * 60 * 1000 : 30 * 60 * 1000; // Shorter cache in production (10 min vs 30 min)
 
-console.log(`Environment: ${IS_PRODUCTION ? 'PRODUCTION' : 'DEVELOPMENT'} - Batch size: ${BATCH_SIZE}, Concurrent: ${MAX_CONCURRENT}`);
+console.log(`Environment: ${IS_PRODUCTION ? 'PRODUCTION' : 'DEVELOPMENT'} - Batch size: ${BATCH_SIZE}, Sequential processing enabled`);
 
-// Initialize background removal library
+// Initialize background removal library with retry logic
 async function initBackgroundRemoval() {
   if (!removeBackgroundNode) {
     try {
       const { removeBackground } = await import('@imgly/background-removal-node');
       removeBackgroundNode = removeBackground;
-      console.log('Background removal library initialized');
+      console.log('Background removal library initialized successfully');
+      
+      // Log memory usage after initialization
+      if (IS_PRODUCTION) {
+        const memUsage = process.memoryUsage();
+        console.log(`Memory after library init: RSS=${Math.round(memUsage.rss/1024/1024)}MB, Heap=${Math.round(memUsage.heapUsed/1024/1024)}MB`);
+      }
     } catch (error) {
       console.error('Failed to initialize background removal:', error);
+      // Don't throw here - let the process continue and handle this gracefully later
     }
   }
 }
@@ -283,6 +290,12 @@ async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> 
   try {
     console.log('Starting server-side background removal');
     
+    // Monitor memory usage in production
+    if (IS_PRODUCTION) {
+      const memUsage = process.memoryUsage();
+      console.log(`Memory before AI processing: RSS=${Math.round(memUsage.rss/1024/1024)}MB, Heap=${Math.round(memUsage.heapUsed/1024/1024)}MB`);
+    }
+    
     // Initialize the library if not already done
     await initBackgroundRemoval();
     
@@ -293,15 +306,37 @@ async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> 
     // First, ensure the buffer is a proper image format
     console.log('Converting input to proper JPEG format...');
     const jpegBuffer = await sharp(inputBuffer)
-      .jpeg({ quality: 98, chromaSubsampling: '4:4:4' }) // High quality for AI processing
+      .jpeg({ 
+        quality: IS_PRODUCTION ? 85 : 98, // Lower quality in production to save memory
+        chromaSubsampling: '4:4:4' 
+      })
       .toBuffer();
+    
+    // Production-optimized AI configuration
+    const aiConfig = IS_PRODUCTION ? {
+      model: 'isnet_quint8', // Smaller, faster model for production
+      output: {
+        format: 'image/png',
+        quality: 0.8 // Lower quality to save memory
+      }
+    } : undefined; // Use defaults for development
     
     // Try multiple approaches - using default settings for maximum background removal
     try {
       // Approach 1: Try direct buffer (default aggressive settings)
-      console.log('Trying direct buffer approach with default aggressive settings...');
-      const blob = await removeBackgroundNode(jpegBuffer);
+      console.log('Trying direct buffer approach with optimized settings...');
+      const blob = aiConfig 
+        ? await removeBackgroundNode(jpegBuffer, aiConfig)
+        : await removeBackgroundNode(jpegBuffer);
+        
       const result = Buffer.from(await blob.arrayBuffer());
+      
+      // Monitor memory after processing
+      if (IS_PRODUCTION) {
+        const memUsage = process.memoryUsage();
+        console.log(`Memory after AI processing: RSS=${Math.round(memUsage.rss/1024/1024)}MB, Heap=${Math.round(memUsage.heapUsed/1024/1024)}MB`);
+      }
+      
       console.log('Server-side background removal completed (direct buffer)');
       return result;
     } catch (directError) {
@@ -317,7 +352,10 @@ async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> 
         console.log('Trying file path approach with JPEG:', tempInputPath);
         
         // Remove background using file path (default settings)
-        const blob = await removeBackgroundNode(tempInputPath);
+        const blob = aiConfig
+          ? await removeBackgroundNode(tempInputPath, aiConfig)
+          : await removeBackgroundNode(tempInputPath);
+          
         const result = Buffer.from(await blob.arrayBuffer());
         
         console.log('Server-side background removal completed (file approach)');
@@ -605,6 +643,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       );
       
+      // Ensure we have at least some results
+      if (processedCache.length === 0) {
+        return res.status(400).json({ 
+          error: 'No images could be processed successfully. This may be due to memory constraints or unsupported image formats.',
+          details: 'Try uploading fewer images at once or check that your images are in supported formats (JPEG, PNG, WebP, GIF).'
+        });
+      }
+      
+      console.log(`Successfully processed ${processedCache.length}/${allImageData.length} images`);
+      
       // Convert to preview format
       const previewImages = processedCache.map(item => ({
         filename: item.filename,
@@ -618,7 +666,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // Return preview images as JSON with session ID
       return res.status(200).json({ 
         images: previewImages,
-        sessionId: sessionId 
+        sessionId: sessionId,
+        processedCount: processedCache.length,
+        totalCount: allImageData.length
       });
       
     } else {
@@ -758,8 +808,19 @@ async function processImageForPreview(inputBuffer: Buffer, removeBackground: boo
       processedBuffer = await addArtificialShadow(processedBuffer);
       console.log('Artificial shadow added for preview image');
     } catch (error) {
-      console.warn('Background removal failed for preview, continuing with original:', error);
-      processedBuffer = inputBuffer;
+      console.warn('Background removal failed for preview, using original with white background:', error);
+      
+      // Graceful fallback: convert to white background instead of failing completely
+      try {
+        processedBuffer = await sharp(inputBuffer)
+          .flatten({ background: { r: 255, g: 255, b: 255 } })
+          .jpeg({ quality: IS_PRODUCTION ? 85 : 95 })
+          .toBuffer();
+        console.log('Applied white background fallback for preview image');
+      } catch (fallbackError) {
+        console.error('Even fallback processing failed, using original:', fallbackError);
+        processedBuffer = inputBuffer;
+      }
     }
   }
   
@@ -918,41 +979,72 @@ async function processImagesInBatches(
     const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(total / BATCH_SIZE);
     
-    console.log(`Processing batch ${batchNumber}/${totalBatches} (${batch.length} images)`);
+    console.log(`Processing batch ${batchNumber}/${totalBatches} (${batch.length} images) - Sequential processing`);
     
     try {
-      // Process batch with timeout protection
-      const batchPromise = Promise.all(
-        batch.map(async (item, index) => {
-          try {
-            // Add small delay to prevent overwhelming the server
-            await new Promise(resolve => setTimeout(resolve, index * 100));
-            
-            const processedBuffer = await processImageForPreview(item.buffer, shouldRemoveBackground);
-            return {
-              buffer: processedBuffer,
-              filename: item.filename,
-              timestamp: Date.now()
-            };
-          } catch (error) {
-            console.error(`Failed to process ${item.filename}:`, error);
-            // Return original image if processing fails
-            return {
-              buffer: await sharp(item.buffer).jpeg({ quality: 90 }).toBuffer(),
-              filename: item.filename,
-              timestamp: Date.now()
-            };
+      // Process images sequentially to avoid memory issues
+      const batchResults: ProcessedImageCache[] = [];
+      
+      for (let index = 0; index < batch.length; index++) {
+        const item = batch[index];
+        console.log(`Processing image ${index + 1}/${batch.length} in batch ${batchNumber}: ${item.filename}`);
+        
+        try {
+          // Add small delay to prevent overwhelming the server
+          if (index > 0) {
+            await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay between images
           }
-        })
-      );
+          
+          const processedBuffer = await processImageForPreview(item.buffer, shouldRemoveBackground);
+          
+          batchResults.push({
+            buffer: processedBuffer,
+            filename: item.filename,
+            timestamp: Date.now()
+          });
+          
+          console.log(`Successfully processed ${item.filename}`);
+          
+          // Force garbage collection after each image in production
+          if (IS_PRODUCTION && global.gc) {
+            global.gc();
+            console.log(`Garbage collection forced after processing ${item.filename}`);
+          }
+          
+        } catch (error) {
+          console.error(`Failed to process ${item.filename}:`, error);
+          
+          // Return original image if processing fails
+          try {
+            const fallbackBuffer = await sharp(item.buffer).jpeg({ quality: 80 }).toBuffer();
+            batchResults.push({
+              buffer: fallbackBuffer,
+              filename: item.filename,
+              timestamp: Date.now()
+            });
+            console.log(`Used fallback processing for ${item.filename}`);
+          } catch (fallbackError) {
+            console.error(`Fallback processing also failed for ${item.filename}:`, fallbackError);
+            // Skip this image entirely if even fallback fails
+            continue;
+          }
+        }
+      }
       
-      const batchResults = await withTimeout(
-        batchPromise,
-        timeoutPerBatch,
-        `Batch ${batchNumber} timed out after ${timeoutPerBatch/1000} seconds`
-      );
+      // Use withTimeout only for the entire batch processing, not individual images
+      const timeoutPromise = new Promise<ProcessedImageCache[]>((resolve) => {
+        setTimeout(() => {
+          console.warn(`Batch ${batchNumber} completed with partial results due to timeout`);
+          resolve(batchResults);
+        }, timeoutPerBatch);
+      });
       
-      processedImages.push(...batchResults);
+      const finalBatchResults = batchResults.length > 0 ? batchResults : await Promise.race([
+        Promise.resolve(batchResults),
+        timeoutPromise
+      ]);
+      
+      processedImages.push(...finalBatchResults);
       
       // Report progress
       if (onProgress) {
@@ -961,9 +1053,10 @@ async function processImagesInBatches(
       
       console.log(`Completed batch ${batchNumber}/${totalBatches} - ${processedImages.length}/${total} images processed`);
       
-      // Force garbage collection in production to manage memory
+      // Force garbage collection after each batch in production
       if (IS_PRODUCTION && global.gc) {
         global.gc();
+        console.log(`Garbage collection forced after batch ${batchNumber}`);
       }
       
     } catch (error) {

@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node --max-old-space-size=2048 --expose-gc node_modules/.bin/next start",
+    "start:prod": "NODE_ENV=production node --max-old-space-size=2048 --expose-gc node_modules/.bin/next start",
     "lint": "next lint"
   },
   "dependencies": {

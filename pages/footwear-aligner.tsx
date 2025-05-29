@@ -552,8 +552,8 @@ function FootwearAligner() {
 
   const handlePreview = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (selectedImages.length === 0 && !selectedSheet) {
-      setMessage("Please upload images or a sheet before processing.");
+    if (selectedImages.length === 0) {
+      setMessage("Please upload images before processing.");
       return;
     }
 
@@ -571,9 +571,10 @@ function FootwearAligner() {
         formData.append("images", file);
       });
     }
-    if (selectedSheet) {
-      formData.append("sheet", selectedSheet);
-    }
+    // CSV sheet upload is disabled
+    // if (selectedSheet) {
+    //   formData.append("sheet", selectedSheet);
+    // }
 
     try {
       const res = await axios.post("/api/process-sneakers-aligner", formData, {
@@ -649,9 +650,10 @@ function FootwearAligner() {
         formData.append("images", file);
       });
     }
-    if (selectedSheet) {
-      formData.append("sheet", selectedSheet);
-    }
+    // CSV sheet upload is disabled
+    // if (selectedSheet) {
+    //   formData.append("sheet", selectedSheet);
+    // }
 
     try {
       const res = await axios.post("/api/process-sneakers-aligner", formData, {
@@ -746,7 +748,7 @@ function FootwearAligner() {
       <main className="flex-grow flex items-center justify-center">
         <div className="max-w-lg w-full p-6">
           <div className="bg-white rounded shadow p-6">
-            <h2 className="text-xl font-bold mb-4 text-gray-800">Upload Options</h2>
+            <h2 className="text-xl font-bold mb-4 text-gray-800">Footwear Aligner</h2>
             <form onSubmit={handlePreview} className="space-y-6">
               {/* Background Removal Option */}
               <div>
@@ -759,11 +761,6 @@ function FootwearAligner() {
                   />
                   <span>AI Background Removal</span>
                 </label>
-                <p className="text-xs text-gray-500 mt-1">
-                  {removeBackground 
-                    ? "✅ AI will remove backgrounds on the server for super-fast processing of thousands of images. Only the footwear will remain." 
-                    : "⚠️ Only basic format conversion and transparency handling (faster but backgrounds may remain)."}
-                </p>
               </div>
 
               {/* Images Dropzone */}
@@ -792,12 +789,13 @@ function FootwearAligner() {
                 )}
                 <p className="text-xs text-gray-500 mt-1">
                   {removeBackground 
-                    ? "Background removal will be handled on the server for maximum speed. AVIF files will be converted to JPEG if your browser supports AVIF. Files will be processed on the server for optimal performance."
+                    ? "Background removal will be handled on the server for optimal performance. AVIF files will be converted to JPEG if your browser supports AVIF."
                     : "AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails."}
                 </p>
               </div>
 
               {/* Sheet Dropzone */}
+              {/* CSV Sheet Upload Section - Hidden per user request
               <div>
                 <label className="font-semibold text-gray-700 mb-2 block">
                   Or Upload a CSV/XLS Sheet
@@ -816,6 +814,7 @@ function FootwearAligner() {
                   <p className="text-gray-700 mt-2">Selected Sheet: {selectedSheet.name}</p>
                 )}
               </div>
+              */}
 
               {/* Submit Button */}
               <button
