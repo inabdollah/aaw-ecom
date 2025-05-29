@@ -226,7 +226,7 @@ async function pngHasTransparency(file: File): Promise<boolean> {
 }
 
 // Function to remove background using AI
-async function removeBackground(file: File): Promise<File> {
+async function removeBackgroundWithAI(file: File): Promise<File> {
   try {
     // Dynamically import the background removal library
     const { removeBackground: aiRemoveBackground } = await import('@imgly/background-removal');
@@ -321,40 +321,63 @@ async function webpHasTransparency(file: File): Promise<boolean> {
     const url = URL.createObjectURL(file);
     
     const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = () => reject(new Error('Failed to load WebP image'));
+    
+    // Add a timeout to prevent hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('WebP loading timeout')), 5000);
+    });
+    
+    const loadPromise = new Promise((resolve, reject) => {
+      img.onload = () => {
+        try {
+          // Create a small canvas to check for transparency
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.min(img.naturalWidth, 100);
+          canvas.height = Math.min(img.naturalHeight, 100);
+          
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(true); // Assume transparency if we can't check
+            return;
+          }
+          
+          // Draw image scaled down
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          
+          // Get image data and check for any transparent pixels
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const data = imageData.data;
+          
+          // Check for any pixels with alpha < 255
+          for (let i = 3; i < data.length; i += 4) {
+            if (data[i] < 255) {
+              resolve(true); // Found transparency
+              return;
+            }
+          }
+          
+          resolve(false); // No transparency found
+        } catch (canvasError) {
+          console.warn('Canvas error while checking WebP transparency:', canvasError);
+          resolve(true); // Assume transparency if canvas fails
+        }
+      };
+      img.onerror = (error) => {
+        console.warn('WebP image load error:', error);
+        reject(new Error('Failed to load WebP image - the file may be corrupted or in an unsupported WebP format'));
+      };
       img.src = url;
     });
     
-    // Create a small canvas to check for transparency
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.min(img.naturalWidth, 100);
-    canvas.height = Math.min(img.naturalHeight, 100);
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
+    try {
+      const result = await Promise.race([loadPromise, timeoutPromise]);
       URL.revokeObjectURL(url);
-      return true; // Assume transparency if we can't check
+      return result as boolean;
+    } catch (error) {
+      URL.revokeObjectURL(url);
+      throw error;
     }
     
-    // Draw image scaled down
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    
-    // Get image data and check for any transparent pixels
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-    
-    URL.revokeObjectURL(url);
-    
-    // Check for any pixels with alpha < 255
-    for (let i = 3; i < data.length; i += 4) {
-      if (data[i] < 255) {
-        return true; // Found transparency
-      }
-    }
-    
-    return false; // No transparency found
   } catch (error) {
     console.warn('Could not determine WebP transparency, assuming it has transparency:', error);
     return true; // Assume transparency if we can't determine
@@ -424,20 +447,22 @@ async function addWhiteBackgroundToWebp(file: File): Promise<File> {
 }
 
 // Function to process files and convert AVIF files to JPEG
-async function processFiles(files: File[]): Promise<File[]> {
+async function processFiles(files: File[], shouldRemoveBackground: boolean): Promise<File[]> {
   const processedFiles: File[] = [];
   
   for (const file of files) {
-    // Step 1: Apply grey background enhancement to all image files
+    // Step 1: Apply AI background removal to all image files (if enabled)
     let currentFile = file;
-    if (file.type.startsWith('image/')) {
+    if (file.type.startsWith('image/') && shouldRemoveBackground) {
       try {
-        console.log(`Enhancing grey background for: ${file.name}`);
-        currentFile = await enhanceGreyBackgroundToWhite(file);
-        console.log(`Successfully enhanced grey background for: ${file.name}`);
+        console.log(`Removing background for: ${file.name}`);
+        const fileWithoutBg = await removeBackgroundWithAI(file);
+        // Add white background to the image after background removal
+        currentFile = await addWhiteBackground(fileWithoutBg);
+        console.log(`Successfully processed background for: ${file.name}`);
       } catch (error) {
-        console.warn(`Grey background enhancement failed for ${file.name}:`, error);
-        currentFile = file; // Keep original if enhancement fails
+        console.warn(`Background removal failed for ${file.name}:`, error);
+        currentFile = file; // Keep original if background removal fails
       }
     }
     
@@ -450,7 +475,7 @@ async function processFiles(files: File[]): Promise<File[]> {
         console.log(`Successfully converted ${currentFile.name} to JPEG`);
       } catch (error) {
         console.warn(`Browser AVIF conversion failed for ${currentFile.name}, will process on server:`, error);
-        // Still add the enhanced file (or original if enhancement failed)
+        // Still add the processed file (or original if processing failed)
         processedFiles.push(currentFile);
       }
     } else if (currentFile.type === 'image/png' || currentFile.name.toLowerCase().endsWith('.png')) {
@@ -458,39 +483,39 @@ async function processFiles(files: File[]): Promise<File[]> {
         console.log(`Checking PNG transparency for: ${currentFile.name}`);
         const hasTransparency = await pngHasTransparency(currentFile);
         
-        if (hasTransparency) {
+        if (hasTransparency && !shouldRemoveBackground) { // Only add white bg if we didn't already process with AI
           console.log(`Adding white background to transparent PNG: ${currentFile.name}`);
           const processedPng = await addWhiteBackgroundToPng(currentFile);
           processedFiles.push(processedPng);
           console.log(`Successfully added white background to ${currentFile.name}`);
         } else {
-          console.log(`PNG has no transparency, using enhanced version: ${currentFile.name}`);
-          processedFiles.push(currentFile); // This is already the enhanced version
+          console.log(`PNG processed, using current version: ${currentFile.name}`);
+          processedFiles.push(currentFile);
         }
       } catch (error) {
-        console.warn(`PNG processing failed for ${currentFile.name}, keeping enhanced version:`, error);
-        processedFiles.push(currentFile); // This is already the enhanced version
+        console.warn(`PNG processing failed for ${currentFile.name}, keeping current version:`, error);
+        processedFiles.push(currentFile);
       }
     } else if (currentFile.type === 'image/webp' || currentFile.name.toLowerCase().endsWith('.webp')) {
       try {
         console.log(`Checking WebP transparency for: ${currentFile.name}`);
         const hasTransparency = await webpHasTransparency(currentFile);
         
-        if (hasTransparency) {
+        if (hasTransparency && !shouldRemoveBackground) { // Only add white bg if we didn't already process with AI
           console.log(`Adding white background to transparent WebP: ${currentFile.name}`);
           const processedWebp = await addWhiteBackgroundToWebp(currentFile);
           processedFiles.push(processedWebp);
           console.log(`Successfully added white background to ${currentFile.name}`);
         } else {
-          console.log(`WebP has no transparency, using enhanced version: ${currentFile.name}`);
-          processedFiles.push(currentFile); // This is already the enhanced version
+          console.log(`WebP processed, using current version: ${currentFile.name}`);
+          processedFiles.push(currentFile);
         }
       } catch (error) {
-        console.warn(`WebP processing failed for ${currentFile.name}, keeping enhanced version:`, error);
-        processedFiles.push(currentFile); // This is already the enhanced version
+        console.warn(`WebP processing failed for ${currentFile.name}, keeping current version:`, error);
+        processedFiles.push(currentFile);
       }
     } else {
-      // For other image types, just use the enhanced version
+      // For other image types, just use the processed version
       processedFiles.push(currentFile);
     }
   }
@@ -504,6 +529,7 @@ function FootwearAligner() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [convertingAvif, setConvertingAvif] = useState(false);
+  const [removeBackground, setRemoveBackground] = useState(false);
 
   // Progress states for upload/download
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -532,18 +558,30 @@ function FootwearAligner() {
     if (hasImages) {
       setConvertingAvif(true);
       
-      if (hasAvif && (hasPng || hasWebp)) {
-        setMessage("Processing images (enhancing grey backgrounds, converting AVIF, processing transparency)...");
-      } else if (hasAvif) {
-        setMessage("Processing images (enhancing grey backgrounds, converting AVIF to JPEG)...");
-      } else if (hasPng || hasWebp) {
-        setMessage("Processing images (enhancing grey backgrounds, processing transparency)...");
-      } else {
-        setMessage("Processing images (enhancing grey backgrounds)...");
+      // Build processing message based on what will be done
+      let processingMessage = "Processing images";
+      const processes = [];
+      
+      if (removeBackground) {
+        processes.push("removing background");
+      }
+      if (hasAvif) {
+        processes.push("converting AVIF");
+      }
+      if (hasPng || hasWebp) {
+        processes.push("processing transparency");
       }
       
+      if (processes.length > 0) {
+        processingMessage += ` (${processes.join(", ")})...`;
+      } else {
+        processingMessage += "...";
+      }
+      
+      setMessage(processingMessage);
+      
       try {
-        const processedFiles = await processFiles(files);
+        const processedFiles = await processFiles(files, removeBackground);
         setSelectedImages(processedFiles);
         
         // Count processed files
@@ -566,8 +604,8 @@ function FootwearAligner() {
         
         let statusMessage = "";
         
-        if (originalImageCount > 0) {
-          statusMessage += `Enhanced grey backgrounds for ${originalImageCount} image(s). `;
+        if (removeBackground && originalImageCount > 0) {
+          statusMessage += `Processed background for ${originalImageCount} image(s). `;
         }
         
         if (originalAvifCount > 0 && convertedAvifCount > 0) {
@@ -576,11 +614,11 @@ function FootwearAligner() {
           statusMessage += "AVIF files will be processed on server. ";
         }
         
-        if (originalPngCount > 0) {
+        if (originalPngCount > 0 && !removeBackground) {
           statusMessage += `Processed ${originalPngCount} PNG file(s) for transparency. `;
         }
         
-        if (originalWebpCount > 0) {
+        if (originalWebpCount > 0 && !removeBackground) {
           statusMessage += `Processed ${originalWebpCount} WebP file(s) for transparency.`;
         }
         
@@ -593,9 +631,15 @@ function FootwearAligner() {
         // Clear message after 5 seconds
         setTimeout(() => setMessage(""), 5000);
       } catch (error) {
-        setMessage("Some files will be processed on the server.");
+        let errorMsg = "Error processing files: ";
+        if (error instanceof Error) {
+          errorMsg += error.message;
+        } else {
+          errorMsg += "Unknown error occurred";
+        }
+        setMessage(errorMsg);
         setSelectedImages(files);
-        setTimeout(() => setMessage(""), 3000);
+        setTimeout(() => setMessage(""), 5000);
       } finally {
         setConvertingAvif(false);
       }
@@ -792,6 +836,24 @@ function FootwearAligner() {
           <div className="bg-white rounded shadow p-6">
             <h2 className="text-xl font-bold mb-4 text-gray-800">Upload Options</h2>
             <form onSubmit={handlePreview} className="space-y-6">
+              {/* Background Removal Option */}
+              <div>
+                <label className="flex items-center space-x-2 font-semibold text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={removeBackground}
+                    onChange={(e) => setRemoveBackground(e.target.checked)}
+                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                  />
+                  <span>Enable AI Background Removal (slower)</span>
+                </label>
+                <p className="text-xs text-gray-500 mt-1">
+                  {removeBackground 
+                    ? "AI will remove backgrounds from all images. This may take longer to process." 
+                    : "Images will be processed with simple transparency handling and format conversion only (faster)."}
+                </p>
+              </div>
+
               {/* Images Dropzone */}
               <div>
                 <label className="font-semibold text-gray-700 mb-2 block">
@@ -817,7 +879,9 @@ function FootwearAligner() {
                   </p>
                 )}
                 <p className="text-xs text-gray-500 mt-1">
-                  All images will have grey backgrounds enhanced to white. AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails.
+                  {removeBackground 
+                    ? "All images will have their backgrounds removed using AI. AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails."
+                    : "AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails."}
                 </p>
               </div>
 

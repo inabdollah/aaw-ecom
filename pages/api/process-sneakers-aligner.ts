@@ -42,84 +42,6 @@ function isBackgroundPixel(r: number, g: number, b: number): boolean {
 }
 
 /**
- * Determines whether a pixel is a grey background that should be enhanced to white
- */
-function isGreyBackgroundPixel(r: number, g: number, b: number): boolean {
-  // Check for light grey backgrounds (but not white)
-  const greyTolerance = 15;
-  const minGreyValue = 180; // Lighter than this will be considered grey background
-  const maxGreyValue = 240; // Darker than this won't be touched
-  
-  // Must be fairly neutral in color (not too much red, green, or blue bias)
-  const colorNeutralTolerance = 20;
-  
-  return (
-    r >= minGreyValue && r <= maxGreyValue &&
-    g >= minGreyValue && g <= maxGreyValue &&
-    b >= minGreyValue && b <= maxGreyValue &&
-    Math.abs(r - g) <= greyTolerance &&
-    Math.abs(r - b) <= greyTolerance &&
-    Math.abs(g - b) <= greyTolerance
-  );
-}
-
-/**
- * Enhance grey backgrounds to white while preserving product details
- */
-async function enhanceGreyBackgroundToWhite(inputBuffer: Buffer): Promise<Buffer> {
-  try {
-    const image = sharp(inputBuffer);
-    const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
-    const { width, height, channels } = info;
-    
-    // Create a new buffer for the enhanced image
-    const enhancedData = Buffer.from(data);
-    
-    // Process each pixel
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = (y * width + x) * channels;
-        const r = data[idx];
-        const g = data[idx + 1];
-        const b = data[idx + 2];
-        
-        // Check if this pixel is a grey background
-        if (isGreyBackgroundPixel(r, g, b)) {
-          // Calculate enhancement factor (closer to white = less enhancement needed)
-          const greyLevel = (r + g + b) / 3;
-          const enhancementFactor = Math.min(1.3, 255 / Math.max(greyLevel, 1));
-          
-          // Apply gentle enhancement towards white
-          enhancedData[idx] = Math.min(255, Math.round(r * enhancementFactor));     // R
-          enhancedData[idx + 1] = Math.min(255, Math.round(g * enhancementFactor)); // G
-          enhancedData[idx + 2] = Math.min(255, Math.round(b * enhancementFactor)); // B
-          
-          // Preserve alpha channel if it exists
-          if (channels === 4) {
-            enhancedData[idx + 3] = data[idx + 3]; // A
-          }
-        }
-      }
-    }
-    
-    // Create new image from enhanced data
-    return await sharp(enhancedData, {
-      raw: {
-        width: width,
-        height: height,
-        channels: channels
-      }
-    })
-    .jpeg({ quality: 95 })
-    .toBuffer();
-    
-  } catch (error) {
-    console.warn('Grey background enhancement failed, using original image:', error);
-    return inputBuffer; // Return original if enhancement fails
-  }
-}
-
-/**
  * Convert any image format to JPEG with white background
  */
 async function convertToJpeg(inputBuffer: Buffer): Promise<Buffer> {
@@ -218,12 +140,8 @@ async function addWhiteBackgroundToWebp(inputBuffer: Buffer): Promise<Buffer> {
  * Processes an image buffer and appends the final JPEG image to the ZIP archive.
  */
 async function processImageBuffer(inputBuffer: Buffer, filename: string, archive: archiver.Archiver) {
-  // Step 1: Enhance grey backgrounds to white (pre-processing)
-  console.log(`Enhancing grey background for: ${filename}`);
-  const enhancedBuffer = await enhanceGreyBackgroundToWhite(inputBuffer);
-  
-  // Step 2: Convert to JPEG first if needed
-  const jpegBuffer = await convertToJpeg(enhancedBuffer);
+  // Convert to JPEG first if needed
+  const jpegBuffer = await convertToJpeg(inputBuffer);
   
   // First, check the dimensions of the input image and resize if needed
   const inputImage = sharp(jpegBuffer);
@@ -539,11 +457,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
  * Process image for preview mode - returns the processed image as a buffer
  */
 async function processImageForPreview(inputBuffer: Buffer): Promise<Buffer> {
-  // Step 1: Enhance grey backgrounds to white (pre-processing)
-  const enhancedBuffer = await enhanceGreyBackgroundToWhite(inputBuffer);
-  
-  // Step 2: Convert to JPEG first if needed (this now handles PNG transparency automatically)
-  const jpegBuffer = await convertToJpeg(enhancedBuffer);
+  // Convert to JPEG first if needed
+  const jpegBuffer = await convertToJpeg(inputBuffer);
   
   // First, check the dimensions of the input image and resize if needed
   const inputImage = sharp(jpegBuffer);
