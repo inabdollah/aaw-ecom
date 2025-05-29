@@ -42,14 +42,194 @@ function isBackgroundPixel(r: number, g: number, b: number): boolean {
 }
 
 /**
+ * Determines whether a pixel is a grey background that should be enhanced to white
+ */
+function isGreyBackgroundPixel(r: number, g: number, b: number): boolean {
+  // Check for light grey backgrounds (but not white)
+  const greyTolerance = 15;
+  const minGreyValue = 180; // Lighter than this will be considered grey background
+  const maxGreyValue = 240; // Darker than this won't be touched
+  
+  // Must be fairly neutral in color (not too much red, green, or blue bias)
+  const colorNeutralTolerance = 20;
+  
+  return (
+    r >= minGreyValue && r <= maxGreyValue &&
+    g >= minGreyValue && g <= maxGreyValue &&
+    b >= minGreyValue && b <= maxGreyValue &&
+    Math.abs(r - g) <= greyTolerance &&
+    Math.abs(r - b) <= greyTolerance &&
+    Math.abs(g - b) <= greyTolerance
+  );
+}
+
+/**
+ * Enhance grey backgrounds to white while preserving product details
+ */
+async function enhanceGreyBackgroundToWhite(inputBuffer: Buffer): Promise<Buffer> {
+  try {
+    const image = sharp(inputBuffer);
+    const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
+    const { width, height, channels } = info;
+    
+    // Create a new buffer for the enhanced image
+    const enhancedData = Buffer.from(data);
+    
+    // Process each pixel
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (y * width + x) * channels;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        
+        // Check if this pixel is a grey background
+        if (isGreyBackgroundPixel(r, g, b)) {
+          // Calculate enhancement factor (closer to white = less enhancement needed)
+          const greyLevel = (r + g + b) / 3;
+          const enhancementFactor = Math.min(1.3, 255 / Math.max(greyLevel, 1));
+          
+          // Apply gentle enhancement towards white
+          enhancedData[idx] = Math.min(255, Math.round(r * enhancementFactor));     // R
+          enhancedData[idx + 1] = Math.min(255, Math.round(g * enhancementFactor)); // G
+          enhancedData[idx + 2] = Math.min(255, Math.round(b * enhancementFactor)); // B
+          
+          // Preserve alpha channel if it exists
+          if (channels === 4) {
+            enhancedData[idx + 3] = data[idx + 3]; // A
+          }
+        }
+      }
+    }
+    
+    // Create new image from enhanced data
+    return await sharp(enhancedData, {
+      raw: {
+        width: width,
+        height: height,
+        channels: channels
+      }
+    })
+    .jpeg({ quality: 95 })
+    .toBuffer();
+    
+  } catch (error) {
+    console.warn('Grey background enhancement failed, using original image:', error);
+    return inputBuffer; // Return original if enhancement fails
+  }
+}
+
+/**
+ * Convert any image format to JPEG with white background
+ */
+async function convertToJpeg(inputBuffer: Buffer): Promise<Buffer> {
+  try {
+    // First try to get metadata to identify the format
+    const metadata = await sharp(inputBuffer).metadata();
+    
+    // If it's already JPEG, return as is
+    if (metadata.format === 'jpeg') {
+      return inputBuffer;
+    }
+    
+    // Create a white background canvas and composite the image on top
+    const image = sharp(inputBuffer);
+    
+    // For PNG files, WebP files, or any images with alpha channels, add white background
+    if (metadata.format === 'png' || metadata.format === 'webp' || metadata.hasAlpha) {
+      console.log(`Adding white background to ${metadata.format} with alpha channel`);
+      return await image
+        .flatten({ background: { r: 255, g: 255, b: 255 } }) // Add white background
+        .jpeg({ quality: 95 })
+        .toBuffer();
+    }
+    
+    // For other formats, convert directly to JPEG
+    return await image
+      .jpeg({ quality: 95 })
+      .toBuffer();
+  } catch (error) {
+    // Check if this is an AVIF-specific error
+    if (error.message && (error.message.includes('heif') || error.message.includes('AVIF') || error.message.includes('bad seek'))) {
+      throw new Error(`AVIF format is not supported on this server. Please convert the image to JPEG, PNG, or WebP format before uploading. You can use online converters or image editing software to convert AVIF files.`);
+    }
+    
+    // Check for other format-specific errors
+    if (error.message && error.message.includes('Input file is missing')) {
+      throw new Error(`Invalid image file. Please ensure the file is not corrupted.`);
+    }
+    
+    if (error.message && error.message.includes('unsupported image format')) {
+      throw new Error(`Unsupported image format. Please use JPEG, PNG, WebP, or GIF formats.`);
+    }
+    
+    // Generic error
+    throw new Error(`Failed to process image: ${error.message}`);
+  }
+}
+
+/**
+ * Add white background to PNG files with transparency
+ */
+async function addWhiteBackgroundToPng(inputBuffer: Buffer): Promise<Buffer> {
+  try {
+    const metadata = await sharp(inputBuffer).metadata();
+    
+    // Only process PNG files with alpha channel
+    if (metadata.format !== 'png' || !metadata.hasAlpha) {
+      return inputBuffer; // Return original if not a transparent PNG
+    }
+    
+    // Add white background and keep as PNG
+    return await sharp(inputBuffer)
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .png()
+      .toBuffer();
+  } catch (error) {
+    throw new Error(`Failed to add white background to PNG: ${error.message}`);
+  }
+}
+
+/**
+ * Add white background to WebP files with transparency
+ */
+async function addWhiteBackgroundToWebp(inputBuffer: Buffer): Promise<Buffer> {
+  try {
+    const metadata = await sharp(inputBuffer).metadata();
+    
+    // Only process WebP files with alpha channel
+    if (metadata.format !== 'webp' || !metadata.hasAlpha) {
+      return inputBuffer; // Return original if not a transparent WebP
+    }
+    
+    console.log('Adding white background to transparent WebP file');
+    
+    // Add white background and convert to JPEG to eliminate any transparency issues
+    return await sharp(inputBuffer)
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .jpeg({ quality: 95 })
+      .toBuffer();
+  } catch (error) {
+    throw new Error(`Failed to add white background to WebP: ${error.message}`);
+  }
+}
+
+/**
  * Processes an image buffer and appends the final JPEG image to the ZIP archive.
  */
 async function processImageBuffer(inputBuffer: Buffer, filename: string, archive: archiver.Archiver) {
+  // Step 1: Enhance grey backgrounds to white (pre-processing)
+  console.log(`Enhancing grey background for: ${filename}`);
+  const enhancedBuffer = await enhanceGreyBackgroundToWhite(inputBuffer);
+  
+  // Step 2: Convert to JPEG first if needed
+  const jpegBuffer = await convertToJpeg(enhancedBuffer);
+  
   // First, check the dimensions of the input image and resize if needed
-  const inputImage = sharp(inputBuffer);
+  const inputImage = sharp(jpegBuffer);
   const metadata = await inputImage.metadata();
   
-  let processedInputBuffer = inputBuffer;
+  let processedInputBuffer = jpegBuffer;
   
   // If the image is larger than 2000x2000, resize it to fit
   if (metadata.width && metadata.height && (metadata.width > 2000 || metadata.height > 2000)) {
@@ -200,16 +380,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // Process directly-uploaded images
       for (const f of fileArray) {
         const filePath = f.filepath;
-        const originalBuffer = fs.readFileSync(filePath);
         const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
         const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
         
-        // Process the image but collect as base64 instead of adding to archive
-        const processedBuffer = await processImageForPreview(originalBuffer);
-        previewImages.push({
-          filename: outName,
-          data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
-        });
+        try {
+          const originalBuffer = fs.readFileSync(filePath);
+          // Process the image but collect as base64 instead of adding to archive
+          const processedBuffer = await processImageForPreview(originalBuffer);
+          previewImages.push({
+            filename: outName,
+            data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
+          });
+        } catch (error) {
+          console.error(`Error processing file ${originalFilename}:`, error);
+          return res.status(400).json({ 
+            error: `Failed to process image`, 
+            failedFile: originalFilename,
+            details: error.message 
+          });
+        }
       }
       
       // Process CSV sheet images
@@ -227,6 +416,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           const productSku = row["product_sku"];
           if (!imageUrl || !productSku) continue;
           
+          const filename = `${productSku}.jpg`;
+          
           try {
             const response = await fetch(imageUrl);
             if (!response.ok) {
@@ -236,14 +427,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             const arrayBuffer = await response.arrayBuffer();
             const imgBuffer = Buffer.from(arrayBuffer);
             
-            const filename = `${productSku}.jpg`;
             const processedBuffer = await processImageForPreview(imgBuffer);
             previewImages.push({
               filename,
               data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
             });
           } catch (err) {
-            console.error("Error fetching image URL:", err);
+            console.error(`Error processing image from URL ${imageUrl}:`, err);
+            return res.status(400).json({ 
+              error: `Failed to process image from CSV`, 
+              failedFile: filename,
+              details: err.message,
+              imageUrl: imageUrl
+            });
           }
         }
       }
@@ -266,11 +462,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // 1) Process directly-uploaded images (if any)
       for (const f of fileArray) {
         const filePath = f.filepath;
-        const originalBuffer = fs.readFileSync(filePath);
-        // Ensure the filename has a .jpg extension
         const originalFilename = f.originalFilename || `processed-${Date.now()}.jpg`;
         const outName = originalFilename.replace(/\.[^.]+$/, '.jpg');
-        await processImageBuffer(originalBuffer, outName, archive);
+        
+        try {
+          const originalBuffer = fs.readFileSync(filePath);
+          await processImageBuffer(originalBuffer, outName, archive);
+        } catch (error) {
+          console.error(`Error processing file ${originalFilename}:`, error);
+          return res.status(400).json({ 
+            error: `Failed to process image`, 
+            failedFile: originalFilename,
+            details: error.message 
+          });
+        }
       }
 
       // 2) Process the CSV sheet (fetch each image_url, rename as product_sku)
@@ -293,6 +498,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           const productSku = row["product_sku"];
           if (!imageUrl || !productSku) continue;
 
+          const filename = `${productSku}.jpg`;
+          
           // Fetch the image using the updated approach:
           try {
             const response = await fetch(imageUrl);
@@ -304,11 +511,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             const arrayBuffer = await response.arrayBuffer();
             const imgBuffer = Buffer.from(arrayBuffer);
 
-            // Use the product SKU for the filename with a .jpg extension
-            const filename = `${productSku}.jpg`;
             await processImageBuffer(imgBuffer, filename, archive);
           } catch (err) {
-            console.error("Error fetching image URL:", err);
+            console.error(`Error processing image from URL ${imageUrl}:`, err);
+            return res.status(400).json({ 
+              error: `Failed to process image from CSV`, 
+              failedFile: filename,
+              details: err.message,
+              imageUrl: imageUrl
+            });
           }
         }
       }
@@ -316,8 +527,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await archive.finalize();
     }
   } catch (error: any) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    console.error("Global error:", error);
+    res.status(500).json({ 
+      error: "Server error during processing",
+      details: error.message 
+    });
   }
 }
 
@@ -325,11 +539,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
  * Process image for preview mode - returns the processed image as a buffer
  */
 async function processImageForPreview(inputBuffer: Buffer): Promise<Buffer> {
+  // Step 1: Enhance grey backgrounds to white (pre-processing)
+  const enhancedBuffer = await enhanceGreyBackgroundToWhite(inputBuffer);
+  
+  // Step 2: Convert to JPEG first if needed (this now handles PNG transparency automatically)
+  const jpegBuffer = await convertToJpeg(enhancedBuffer);
+  
   // First, check the dimensions of the input image and resize if needed
-  const inputImage = sharp(inputBuffer);
+  const inputImage = sharp(jpegBuffer);
   const metadata = await inputImage.metadata();
   
-  let processedInputBuffer = inputBuffer;
+  let processedInputBuffer = jpegBuffer;
   
   // If the image is larger than 2000x2000, resize it to fit
   if (metadata.width && metadata.height && (metadata.width > 2000 || metadata.height > 2000)) {

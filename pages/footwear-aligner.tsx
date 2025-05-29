@@ -30,6 +30,13 @@ const FilePicker = ({
     },
   });
 
+  // Calculate the number of selected files
+  const fileCount = selectedFiles 
+    ? Array.isArray(selectedFiles) 
+      ? selectedFiles.length 
+      : 1
+    : 0;
+
   return (
     <div
       {...getRootProps()}
@@ -43,31 +50,460 @@ const FilePicker = ({
       ) : (
         <p className="text-gray-600">{placeholder}</p>
       )}
-      {/* Display file names if files are selected */}
-      {selectedFiles &&
-        ((Array.isArray(selectedFiles) && selectedFiles.length > 0) ||
-          (!Array.isArray(selectedFiles) && selectedFiles)) && (
-          <div className="mt-2">
-            {Array.isArray(selectedFiles) ? (
-              selectedFiles.map((file, index) => (
-                <p key={index} className="text-sm text-gray-700">
-                  {file.name}
-                </p>
-              ))
-            ) : (
-              <p className="text-sm text-gray-700">{selectedFiles.name}</p>
-            )}
-          </div>
-        )}
+      {/* Display file count if files are selected */}
+      {fileCount > 0 && (
+        <div className="mt-2">
+          <p className="text-sm text-gray-700">
+            {fileCount} file{fileCount !== 1 ? 's' : ''} selected
+          </p>
+        </div>
+      )}
     </div>
   );
 };
+
+// Function to convert AVIF to JPEG on the client side using browser's built-in capabilities
+async function convertAvifToJpeg(file: File): Promise<File> {
+  try {
+    // Create a URL for the file
+    const url = URL.createObjectURL(file);
+    
+    // Load the image using the browser's built-in AVIF support
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Failed to load AVIF image'));
+      img.src = url;
+    });
+    
+    // Create a canvas to convert the image to JPEG
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Failed to get canvas context');
+    }
+    
+    // Fill with white background (important for JPEG conversion)
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw the image on the canvas
+    ctx.drawImage(img, 0, 0);
+    
+    // Clean up the object URL
+    URL.revokeObjectURL(url);
+    
+    // Convert canvas to blob
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error('Failed to convert to JPEG'));
+            return;
+          }
+          
+          // Create a new File object with the JPEG data
+          const jpegFile = new File(
+            [blob],
+            file.name.replace(/\.avif$/i, '.jpg'),
+            { type: 'image/jpeg' }
+          );
+          
+          resolve(jpegFile);
+        },
+        'image/jpeg',
+        0.95 // Quality
+      );
+    });
+  } catch (error) {
+    console.error('Failed to convert AVIF to JPEG:', error);
+    throw error;
+  }
+}
+
+// Function to add white background to PNG files with transparency
+async function addWhiteBackgroundToPng(file: File): Promise<File> {
+  try {
+    // Create a URL for the file
+    const url = URL.createObjectURL(file);
+    
+    // Load the image
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Failed to load PNG image'));
+      img.src = url;
+    });
+    
+    // Create a canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Failed to get canvas context');
+    }
+    
+    // Fill with white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw the image on top of the white background
+    ctx.drawImage(img, 0, 0);
+    
+    // Clean up the object URL
+    URL.revokeObjectURL(url);
+    
+    // Convert canvas to blob (keep as PNG to maintain quality)
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error('Failed to process PNG image'));
+            return;
+          }
+          
+          // Create a new File object with the processed PNG data
+          const processedFile = new File(
+            [blob],
+            file.name,
+            { type: 'image/png' }
+          );
+          
+          resolve(processedFile);
+        },
+        'image/png',
+        1 // Maximum quality for PNG
+      );
+    });
+  } catch (error) {
+    console.error('Failed to add white background to PNG:', error);
+    throw error;
+  }
+}
+
+// Function to check if a PNG has transparency
+async function pngHasTransparency(file: File): Promise<boolean> {
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const uint8Array = new Uint8Array(arrayBuffer);
+    
+    // Check PNG signature
+    if (uint8Array[0] !== 0x89 || uint8Array[1] !== 0x50 || uint8Array[2] !== 0x4E || uint8Array[3] !== 0x47) {
+      return false; // Not a PNG file
+    }
+    
+    // Look for tRNS chunk (transparency) or IHDR with alpha channel
+    let offset = 8; // Skip PNG signature
+    while (offset < uint8Array.length - 8) {
+      const chunkLength = (uint8Array[offset] << 24) | (uint8Array[offset + 1] << 16) | (uint8Array[offset + 2] << 8) | uint8Array[offset + 3];
+      const chunkType = String.fromCharCode(uint8Array[offset + 4], uint8Array[offset + 5], uint8Array[offset + 6], uint8Array[offset + 7]);
+      
+      if (chunkType === 'IHDR') {
+        // Check color type (offset + 8 + 9 = color type byte)
+        const colorType = uint8Array[offset + 8 + 9];
+        // Color types 4 and 6 have alpha channel
+        if (colorType === 4 || colorType === 6) {
+          return true;
+        }
+      } else if (chunkType === 'tRNS') {
+        // Transparency chunk found
+        return true;
+      }
+      
+      offset += 4 + 4 + chunkLength + 4; // length + type + data + crc
+    }
+    
+    return false;
+  } catch (error) {
+    console.warn('Could not determine PNG transparency, assuming it has transparency:', error);
+    return true; // Assume transparency if we can't determine
+  }
+}
+
+// Function to remove background using AI
+async function removeBackground(file: File): Promise<File> {
+  try {
+    // Dynamically import the background removal library
+    const { removeBackground: aiRemoveBackground } = await import('@imgly/background-removal');
+    
+    console.log(`Removing background for: ${file.name}`);
+    
+    // Remove background using AI
+    const imageWithoutBackground = await aiRemoveBackground(file);
+    
+    // Convert the result to a File object
+    const processedFile = new File(
+      [imageWithoutBackground],
+      file.name.replace(/\.(jpg|jpeg|png|webp|avif)$/i, '_no_bg.png'),
+      { type: 'image/png' }
+    );
+    
+    console.log(`Successfully removed background for: ${file.name}`);
+    return processedFile;
+    
+  } catch (error) {
+    console.warn('AI background removal failed:', error);
+    throw error;
+  }
+}
+
+// Function to add white background to image (for images that had background removed)
+async function addWhiteBackground(file: File): Promise<File> {
+  try {
+    // Create a URL for the file
+    const url = URL.createObjectURL(file);
+    
+    // Load the image
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Failed to load image'));
+      img.src = url;
+    });
+    
+    // Create a canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Failed to get canvas context');
+    }
+    
+    // Fill with white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw the image on top of the white background
+    ctx.drawImage(img, 0, 0);
+    
+    // Clean up the object URL
+    URL.revokeObjectURL(url);
+    
+    // Convert canvas to blob
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error('Failed to add white background'));
+            return;
+          }
+          
+          // Create a new File object
+          const processedFile = new File(
+            [blob],
+            file.name.replace(/_no_bg\.png$/i, '_white_bg.png'),
+            { type: 'image/png' }
+          );
+          
+          resolve(processedFile);
+        },
+        'image/png',
+        1
+      );
+    });
+  } catch (error) {
+    console.warn('Failed to add white background:', error);
+    throw error;
+  }
+}
+
+// Function to check if a WebP has transparency
+async function webpHasTransparency(file: File): Promise<boolean> {
+  try {
+    // For WebP, we'll use a simpler approach by checking if the canvas reveals transparency
+    const url = URL.createObjectURL(file);
+    
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Failed to load WebP image'));
+      img.src = url;
+    });
+    
+    // Create a small canvas to check for transparency
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.min(img.naturalWidth, 100);
+    canvas.height = Math.min(img.naturalHeight, 100);
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      URL.revokeObjectURL(url);
+      return true; // Assume transparency if we can't check
+    }
+    
+    // Draw image scaled down
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    
+    // Get image data and check for any transparent pixels
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    
+    URL.revokeObjectURL(url);
+    
+    // Check for any pixels with alpha < 255
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) {
+        return true; // Found transparency
+      }
+    }
+    
+    return false; // No transparency found
+  } catch (error) {
+    console.warn('Could not determine WebP transparency, assuming it has transparency:', error);
+    return true; // Assume transparency if we can't determine
+  }
+}
+
+// Function to add white background to WebP files with transparency
+async function addWhiteBackgroundToWebp(file: File): Promise<File> {
+  try {
+    // Create a URL for the file
+    const url = URL.createObjectURL(file);
+    
+    // Load the image
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Failed to load WebP image'));
+      img.src = url;
+    });
+    
+    // Create a canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Failed to get canvas context');
+    }
+    
+    // Fill with white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw the image on top of the white background
+    ctx.drawImage(img, 0, 0);
+    
+    // Clean up the object URL
+    URL.revokeObjectURL(url);
+    
+    // Convert canvas to blob (convert to JPEG to ensure no transparency issues)
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error('Failed to process WebP image'));
+            return;
+          }
+          
+          // Create a new File object with JPEG format to avoid any transparency issues
+          const processedFile = new File(
+            [blob],
+            file.name.replace(/\.webp$/i, '.jpg'),
+            { type: 'image/jpeg' }
+          );
+          
+          resolve(processedFile);
+        },
+        'image/jpeg',
+        0.95 // High quality
+      );
+    });
+  } catch (error) {
+    console.error('Failed to add white background to WebP:', error);
+    throw error;
+  }
+}
+
+// Function to process files and convert AVIF files to JPEG
+async function processFiles(files: File[]): Promise<File[]> {
+  const processedFiles: File[] = [];
+  
+  for (const file of files) {
+    // Step 1: Apply grey background enhancement to all image files
+    let currentFile = file;
+    if (file.type.startsWith('image/')) {
+      try {
+        console.log(`Enhancing grey background for: ${file.name}`);
+        currentFile = await enhanceGreyBackgroundToWhite(file);
+        console.log(`Successfully enhanced grey background for: ${file.name}`);
+      } catch (error) {
+        console.warn(`Grey background enhancement failed for ${file.name}:`, error);
+        currentFile = file; // Keep original if enhancement fails
+      }
+    }
+    
+    // Step 2: Handle specific format conversions
+    if (currentFile.type === 'image/avif' || currentFile.name.toLowerCase().endsWith('.avif')) {
+      try {
+        console.log(`Converting AVIF file: ${currentFile.name}`);
+        const jpegFile = await convertAvifToJpeg(currentFile);
+        processedFiles.push(jpegFile);
+        console.log(`Successfully converted ${currentFile.name} to JPEG`);
+      } catch (error) {
+        console.warn(`Browser AVIF conversion failed for ${currentFile.name}, will process on server:`, error);
+        // Still add the enhanced file (or original if enhancement failed)
+        processedFiles.push(currentFile);
+      }
+    } else if (currentFile.type === 'image/png' || currentFile.name.toLowerCase().endsWith('.png')) {
+      try {
+        console.log(`Checking PNG transparency for: ${currentFile.name}`);
+        const hasTransparency = await pngHasTransparency(currentFile);
+        
+        if (hasTransparency) {
+          console.log(`Adding white background to transparent PNG: ${currentFile.name}`);
+          const processedPng = await addWhiteBackgroundToPng(currentFile);
+          processedFiles.push(processedPng);
+          console.log(`Successfully added white background to ${currentFile.name}`);
+        } else {
+          console.log(`PNG has no transparency, using enhanced version: ${currentFile.name}`);
+          processedFiles.push(currentFile); // This is already the enhanced version
+        }
+      } catch (error) {
+        console.warn(`PNG processing failed for ${currentFile.name}, keeping enhanced version:`, error);
+        processedFiles.push(currentFile); // This is already the enhanced version
+      }
+    } else if (currentFile.type === 'image/webp' || currentFile.name.toLowerCase().endsWith('.webp')) {
+      try {
+        console.log(`Checking WebP transparency for: ${currentFile.name}`);
+        const hasTransparency = await webpHasTransparency(currentFile);
+        
+        if (hasTransparency) {
+          console.log(`Adding white background to transparent WebP: ${currentFile.name}`);
+          const processedWebp = await addWhiteBackgroundToWebp(currentFile);
+          processedFiles.push(processedWebp);
+          console.log(`Successfully added white background to ${currentFile.name}`);
+        } else {
+          console.log(`WebP has no transparency, using enhanced version: ${currentFile.name}`);
+          processedFiles.push(currentFile); // This is already the enhanced version
+        }
+      } catch (error) {
+        console.warn(`WebP processing failed for ${currentFile.name}, keeping enhanced version:`, error);
+        processedFiles.push(currentFile); // This is already the enhanced version
+      }
+    } else {
+      // For other image types, just use the enhanced version
+      processedFiles.push(currentFile);
+    }
+  }
+  
+  return processedFiles;
+}
 
 function FootwearAligner() {
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [selectedSheet, setSelectedSheet] = useState<File | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const [convertingAvif, setConvertingAvif] = useState(false);
 
   // Progress states for upload/download
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -78,6 +514,95 @@ function FootwearAligner() {
   // Preview states
   const [previewImages, setPreviewImages] = useState<Array<{filename: string; data: string}>>([]);
   const [showPreview, setShowPreview] = useState(false);
+
+  // Handle file selection with AVIF conversion and PNG transparency processing
+  const handleFilesSelected = async (files: File[]) => {
+    // Check if any files need processing
+    const hasImages = files.some(file => file.type.startsWith('image/'));
+    const hasAvif = files.some(file => 
+      file.type === 'image/avif' || file.name.toLowerCase().endsWith('.avif')
+    );
+    const hasPng = files.some(file => 
+      file.type === 'image/png' || file.name.toLowerCase().endsWith('.png')
+    );
+    const hasWebp = files.some(file => 
+      file.type === 'image/webp' || file.name.toLowerCase().endsWith('.webp')
+    );
+    
+    if (hasImages) {
+      setConvertingAvif(true);
+      
+      if (hasAvif && (hasPng || hasWebp)) {
+        setMessage("Processing images (enhancing grey backgrounds, converting AVIF, processing transparency)...");
+      } else if (hasAvif) {
+        setMessage("Processing images (enhancing grey backgrounds, converting AVIF to JPEG)...");
+      } else if (hasPng || hasWebp) {
+        setMessage("Processing images (enhancing grey backgrounds, processing transparency)...");
+      } else {
+        setMessage("Processing images (enhancing grey backgrounds)...");
+      }
+      
+      try {
+        const processedFiles = await processFiles(files);
+        setSelectedImages(processedFiles);
+        
+        // Count processed files
+        const originalImageCount = files.filter(f => f.type.startsWith('image/')).length;
+        const originalAvifCount = files.filter(f => 
+          f.type === 'image/avif' || f.name.toLowerCase().endsWith('.avif')
+        ).length;
+        const originalPngCount = files.filter(f => 
+          f.type === 'image/png' || f.name.toLowerCase().endsWith('.png')
+        ).length;
+        const originalWebpCount = files.filter(f => 
+          f.type === 'image/webp' || f.name.toLowerCase().endsWith('.webp')
+        ).length;
+        
+        const remainingAvifCount = processedFiles.filter(f => 
+          f.type === 'image/avif' || f.name.toLowerCase().endsWith('.avif')
+        ).length;
+        
+        const convertedAvifCount = originalAvifCount - remainingAvifCount;
+        
+        let statusMessage = "";
+        
+        if (originalImageCount > 0) {
+          statusMessage += `Enhanced grey backgrounds for ${originalImageCount} image(s). `;
+        }
+        
+        if (originalAvifCount > 0 && convertedAvifCount > 0) {
+          statusMessage += `Converted ${convertedAvifCount}/${originalAvifCount} AVIF file(s) to JPEG. `;
+        } else if (originalAvifCount > 0 && convertedAvifCount === 0) {
+          statusMessage += "AVIF files will be processed on server. ";
+        }
+        
+        if (originalPngCount > 0) {
+          statusMessage += `Processed ${originalPngCount} PNG file(s) for transparency. `;
+        }
+        
+        if (originalWebpCount > 0) {
+          statusMessage += `Processed ${originalWebpCount} WebP file(s) for transparency.`;
+        }
+        
+        if (statusMessage) {
+          setMessage(statusMessage.trim());
+        } else {
+          setMessage("Files processed successfully.");
+        }
+        
+        // Clear message after 5 seconds
+        setTimeout(() => setMessage(""), 5000);
+      } catch (error) {
+        setMessage("Some files will be processed on the server.");
+        setSelectedImages(files);
+        setTimeout(() => setMessage(""), 3000);
+      } finally {
+        setConvertingAvif(false);
+      }
+    } else {
+      setSelectedImages(files);
+    }
+  };
 
   const handlePreview = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -126,7 +651,26 @@ function FootwearAligner() {
         console.error("Invalid response:", res.data);
       }
     } catch (err: any) {
-      setMessage(`Processing failed: ${err.response?.data?.error || err.message}`);
+      // Improved error handling
+      let errorMessage = "Processing failed: ";
+      
+      if (err.response?.data?.error) {
+        errorMessage += err.response.data.error;
+        
+        // Check if there's specific file information in the error
+        if (err.response.data.failedFile) {
+          errorMessage += ` (File: ${err.response.data.failedFile})`;
+        }
+        if (err.response.data.details) {
+          errorMessage += ` - ${err.response.data.details}`;
+        }
+      } else if (err.message) {
+        errorMessage += err.message;
+      } else {
+        errorMessage += "Unknown error occurred";
+      }
+      
+      setMessage(errorMessage);
       console.error("Preview error:", err);
     } finally {
       setLoading(false);
@@ -193,7 +737,33 @@ function FootwearAligner() {
       window.URL.revokeObjectURL(url);
       setMessage("Download started!");
     } catch (err: any) {
-      setMessage(`Download failed: ${err.message}`);
+      // Improved error handling for download
+      let errorMessage = "Download failed: ";
+      
+      if (err.response?.data) {
+        // If the response is a blob, we need to read it as text
+        if (err.response.data instanceof Blob) {
+          const text = await err.response.data.text();
+          try {
+            const errorData = JSON.parse(text);
+            errorMessage += errorData.error || text;
+            if (errorData.failedFile) {
+              errorMessage += ` (File: ${errorData.failedFile})`;
+            }
+          } catch {
+            errorMessage += text;
+          }
+        } else if (err.response.data.error) {
+          errorMessage += err.response.data.error;
+        }
+      } else if (err.message) {
+        errorMessage += err.message;
+      } else {
+        errorMessage += "Unknown error occurred";
+      }
+      
+      setMessage(errorMessage);
+      console.error("Download error:", err);
     } finally {
       setLoading(false);
       setStage("idle");
@@ -228,17 +798,27 @@ function FootwearAligner() {
                   Upload Individual Images
                 </label>
                 <FilePicker
-                  accept={{ "image/*": [".jpeg", ".jpg", ".png", ".gif"] }}
+                  accept={{ 
+                    "image/*": [".jpeg", ".jpg", ".png", ".gif", ".avif", ".webp"],
+                    "image/jpeg": [".jpeg", ".jpg"],
+                    "image/png": [".png"],
+                    "image/gif": [".gif"],
+                    "image/avif": [".avif"],
+                    "image/webp": [".webp"]
+                  }}
                   multiple={true}
-                  onFilesSelected={(files) => setSelectedImages(files)}
+                  onFilesSelected={handleFilesSelected}
                   selectedFiles={selectedImages}
-                  placeholder="Drag & drop images here, or click to select files"
+                  placeholder="Drag & drop images here (JPEG, PNG, GIF, WebP, AVIF)"
                 />
                 {selectedImages.length > 0 && (
                   <p className="text-gray-700 mt-2">
                     {selectedImages.length} image(s) selected.
                   </p>
                 )}
+                <p className="text-xs text-gray-500 mt-1">
+                  All images will have grey backgrounds enhanced to white. AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails.
+                </p>
               </div>
 
               {/* Sheet Dropzone */}
@@ -264,10 +844,10 @@ function FootwearAligner() {
               {/* Submit Button */}
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || convertingAvif}
                 className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded shadow disabled:opacity-50"
               >
-                {loading ? "Processing..." : "Preview Images"}
+                {convertingAvif ? "Processing images..." : loading ? "Processing..." : "Preview Images"}
               </button>
 
               {/* Progress Indicators */}
@@ -306,7 +886,7 @@ function FootwearAligner() {
 
             {/* Feedback Message */}
             {message && (
-              <div className="mt-4 p-4 rounded bg-gray-100 text-gray-700">
+              <div className={`mt-4 p-4 rounded ${message.includes('failed') || message.includes('Failed') ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
                 {message}
               </div>
             )}
