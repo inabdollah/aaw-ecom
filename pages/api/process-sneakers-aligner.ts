@@ -13,6 +13,22 @@ import fetch from "node-fetch";
 import Papa from "papaparse"; // yarn add papaparse (or npm i papaparse)
 import fs from "fs";
 
+// Server-side background removal
+let removeBackgroundNode: any = null;
+
+// Initialize background removal library
+async function initBackgroundRemoval() {
+  if (!removeBackgroundNode) {
+    try {
+      const { removeBackground } = await import('@imgly/background-removal-node');
+      removeBackgroundNode = removeBackground;
+      console.log('Background removal library initialized');
+    } catch (error) {
+      console.error('Failed to initialize background removal:', error);
+    }
+  }
+}
+
 // Disable Next.js default body parsing so formidable can handle file uploads
 export const config = {
   api: {
@@ -137,11 +153,54 @@ async function addWhiteBackgroundToWebp(inputBuffer: Buffer): Promise<Buffer> {
 }
 
 /**
+ * Remove background using server-side AI
+ */
+async function removeBackgroundServerSide(inputBuffer: Buffer): Promise<Buffer> {
+  try {
+    console.log('Starting server-side background removal');
+    
+    // Initialize the library if not already done
+    await initBackgroundRemoval();
+    
+    if (!removeBackgroundNode) {
+      throw new Error('Background removal library not available');
+    }
+    
+    // Remove background
+    const blob = await removeBackgroundNode(inputBuffer);
+    
+    // Convert blob to buffer
+    const result = Buffer.from(await blob.arrayBuffer());
+    
+    console.log('Server-side background removal completed');
+    return result;
+    
+  } catch (error) {
+    console.error('Server-side background removal failed:', error);
+    throw new Error(`Background removal failed: ${error.message}`);
+  }
+}
+
+/**
  * Processes an image buffer and appends the final JPEG image to the ZIP archive.
  */
-async function processImageBuffer(inputBuffer: Buffer, filename: string, archive: archiver.Archiver) {
-  // Convert to JPEG first if needed
-  const jpegBuffer = await convertToJpeg(inputBuffer);
+async function processImageBuffer(inputBuffer: Buffer, filename: string, archive: archiver.Archiver, removeBackground = false) {
+  let processedBuffer = inputBuffer;
+  
+  // Step 1: Remove background if requested
+  if (removeBackground) {
+    try {
+      console.log(`Removing background for: ${filename}`);
+      processedBuffer = await removeBackgroundServerSide(inputBuffer);
+      console.log(`Background removed for: ${filename}`);
+    } catch (error) {
+      console.warn(`Background removal failed for ${filename}, continuing with original:`, error);
+      processedBuffer = inputBuffer;
+    }
+  }
+  
+  // Step 2: Convert to JPEG
+  const jpegBuffer = await convertToJpeg(processedBuffer);
   
   // First, check the dimensions of the input image and resize if needed
   const inputImage = sharp(jpegBuffer);
@@ -279,6 +338,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const previewField = Array.isArray(fields.preview) ? fields.preview[0] : fields.preview;
     const isPreview = previewField === 'true' || previewField === true;
     
+    // Check if background removal is enabled
+    const removeBackgroundField = Array.isArray(fields.removeBackground) ? fields.removeBackground[0] : fields.removeBackground;
+    const shouldRemoveBackground = removeBackgroundField === 'true' || removeBackgroundField === true;
+    
+    console.log(`Processing request - Preview: ${isPreview}, Remove Background: ${shouldRemoveBackground}`);
+    
     // Grab the images array from the form
     const fileArray = Array.isArray(files.images)
       ? files.images
@@ -304,7 +369,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         try {
           const originalBuffer = fs.readFileSync(filePath);
           // Process the image but collect as base64 instead of adding to archive
-          const processedBuffer = await processImageForPreview(originalBuffer);
+          const processedBuffer = await processImageForPreview(originalBuffer, shouldRemoveBackground);
           previewImages.push({
             filename: outName,
             data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
@@ -345,7 +410,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             const arrayBuffer = await response.arrayBuffer();
             const imgBuffer = Buffer.from(arrayBuffer);
             
-            const processedBuffer = await processImageForPreview(imgBuffer);
+            const processedBuffer = await processImageForPreview(imgBuffer, shouldRemoveBackground);
             previewImages.push({
               filename,
               data: `data:image/jpeg;base64,${processedBuffer.toString('base64')}`
@@ -385,7 +450,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         
         try {
           const originalBuffer = fs.readFileSync(filePath);
-          await processImageBuffer(originalBuffer, outName, archive);
+          await processImageBuffer(originalBuffer, outName, archive, shouldRemoveBackground);
         } catch (error) {
           console.error(`Error processing file ${originalFilename}:`, error);
           return res.status(400).json({ 
@@ -429,7 +494,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             const arrayBuffer = await response.arrayBuffer();
             const imgBuffer = Buffer.from(arrayBuffer);
 
-            await processImageBuffer(imgBuffer, filename, archive);
+            await processImageBuffer(imgBuffer, filename, archive, shouldRemoveBackground);
           } catch (err) {
             console.error(`Error processing image from URL ${imageUrl}:`, err);
             return res.status(400).json({ 
@@ -456,9 +521,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 /**
  * Process image for preview mode - returns the processed image as a buffer
  */
-async function processImageForPreview(inputBuffer: Buffer): Promise<Buffer> {
-  // Convert to JPEG first if needed
-  const jpegBuffer = await convertToJpeg(inputBuffer);
+async function processImageForPreview(inputBuffer: Buffer, removeBackground: boolean): Promise<Buffer> {
+  let processedBuffer = inputBuffer;
+  
+  // Step 1: Remove background if requested
+  if (removeBackground) {
+    try {
+      console.log('Removing background for preview image');
+      processedBuffer = await removeBackgroundServerSide(inputBuffer);
+      console.log('Background removed for preview image');
+    } catch (error) {
+      console.warn('Background removal failed for preview, continuing with original:', error);
+      processedBuffer = inputBuffer;
+    }
+  }
+  
+  // Step 2: Convert to JPEG
+  const jpegBuffer = await convertToJpeg(processedBuffer);
   
   // First, check the dimensions of the input image and resize if needed
   const inputImage = sharp(jpegBuffer);

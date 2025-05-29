@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@imgly/background-removal": "^1.6.0",
+    "@imgly/background-removal-node": "^1.4.5",
     "archiver": "^7.0.1",
     "axios": "^1.7.9",
     "formidable": "^3.5.2",

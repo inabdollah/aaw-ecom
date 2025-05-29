@@ -225,104 +225,6 @@ async function pngHasTransparency(file: File): Promise<boolean> {
   }
 }
 
-// Function to remove background using AI
-async function removeBackgroundWithAI(file: File): Promise<File> {
-  try {
-    console.log(`Starting AI background removal for: ${file.name}, size: ${file.size} bytes`);
-    
-    // Dynamically import the background removal library
-    const { removeBackground: aiRemoveBackground } = await import('@imgly/background-removal');
-    
-    console.log(`AI library loaded, processing: ${file.name}`);
-    
-    // Remove background using AI
-    const imageWithoutBackground = await aiRemoveBackground(file);
-    
-    console.log(`AI processing complete for: ${file.name}, result type:`, typeof imageWithoutBackground);
-    
-    // Convert the result to a File object
-    const processedFile = new File(
-      [imageWithoutBackground],
-      file.name.replace(/\.(jpg|jpeg|png|webp|avif)$/i, '_no_bg.png'),
-      { type: 'image/png' }
-    );
-    
-    console.log(`Successfully removed background for: ${file.name}, new size: ${processedFile.size} bytes`);
-    return processedFile;
-    
-  } catch (error) {
-    console.error('AI background removal failed with error:', error);
-    console.error('Error details:', {
-      message: error.message,
-      stack: error.stack,
-      name: error.name
-    });
-    throw error;
-  }
-}
-
-// Function to add white background to image (for images that had background removed)
-async function addWhiteBackground(file: File): Promise<File> {
-  try {
-    // Create a URL for the file
-    const url = URL.createObjectURL(file);
-    
-    // Load the image
-    const img = new Image();
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = () => reject(new Error('Failed to load image'));
-      img.src = url;
-    });
-    
-    // Create a canvas
-    const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      throw new Error('Failed to get canvas context');
-    }
-    
-    // Fill with white background
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw the image on top of the white background
-    ctx.drawImage(img, 0, 0);
-    
-    // Clean up the object URL
-    URL.revokeObjectURL(url);
-    
-    // Convert canvas to blob
-    return new Promise((resolve, reject) => {
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) {
-            reject(new Error('Failed to add white background'));
-            return;
-          }
-          
-          // Create a new File object
-          const processedFile = new File(
-            [blob],
-            file.name.replace(/_no_bg\.png$/i, '_white_bg.png'),
-            { type: 'image/png' }
-          );
-          
-          resolve(processedFile);
-        },
-        'image/png',
-        1
-      );
-    });
-  } catch (error) {
-    console.warn('Failed to add white background:', error);
-    throw error;
-  }
-}
-
 // Function to check if a WebP has transparency
 async function webpHasTransparency(file: File): Promise<boolean> {
   try {
@@ -460,81 +362,58 @@ async function processFiles(files: File[], shouldRemoveBackground: boolean): Pro
   const processedFiles: File[] = [];
   
   for (const file of files) {
-    // Step 1: Apply AI background removal to all image files (if enabled)
+    console.log(`=== Starting to process: ${file.name} ===`);
     let currentFile = file;
-    if (file.type.startsWith('image/') && shouldRemoveBackground) {
-      try {
-        console.log(`=== Processing image: ${file.name} ===`);
-        console.log(`File type: ${file.type}, Should remove background: ${shouldRemoveBackground}`);
-        console.log(`Removing background for: ${file.name}`);
-        const fileWithoutBg = await removeBackgroundWithAI(file);
-        console.log(`Background removed, adding white background for: ${file.name}`);
-        // Add white background to the image after background removal
-        currentFile = await addWhiteBackground(fileWithoutBg);
-        console.log(`Successfully processed background for: ${file.name}`);
-        console.log(`=== Completed processing: ${file.name} ===`);
-      } catch (error) {
-        console.error(`=== Background removal failed for ${file.name} ===`);
-        console.error('Error details:', error);
-        console.warn(`Background removal failed for ${file.name}:`, error);
-        currentFile = file; // Keep original if background removal fails
-      }
-    } else {
-      console.log(`Skipping background removal for: ${file.name} (type: ${file.type}, shouldRemove: ${shouldRemoveBackground})`);
-    }
     
-    // Step 2: Handle specific format conversions
+    // Step 1: Convert unsupported formats FIRST (before server processing)
     if (currentFile.type === 'image/avif' || currentFile.name.toLowerCase().endsWith('.avif')) {
       try {
-        console.log(`Converting AVIF file: ${currentFile.name}`);
-        const jpegFile = await convertAvifToJpeg(currentFile);
-        processedFiles.push(jpegFile);
-        console.log(`Successfully converted ${currentFile.name} to JPEG`);
+        console.log(`Converting AVIF file first: ${currentFile.name}`);
+        currentFile = await convertAvifToJpeg(currentFile);
+        console.log(`Successfully converted AVIF to JPEG: ${currentFile.name}`);
       } catch (error) {
-        console.warn(`Browser AVIF conversion failed for ${currentFile.name}, will process on server:`, error);
-        // Still add the processed file (or original if processing failed)
-        processedFiles.push(currentFile);
+        console.warn(`Browser AVIF conversion failed for ${currentFile.name}, keeping original:`, error);
+        // Keep the original AVIF file for server processing
       }
-    } else if (currentFile.type === 'image/png' || currentFile.name.toLowerCase().endsWith('.png')) {
-      try {
-        console.log(`Checking PNG transparency for: ${currentFile.name}`);
-        const hasTransparency = await pngHasTransparency(currentFile);
-        
-        if (hasTransparency && !shouldRemoveBackground) { // Only add white bg if we didn't already process with AI
-          console.log(`Adding white background to transparent PNG: ${currentFile.name}`);
-          const processedPng = await addWhiteBackgroundToPng(currentFile);
-          processedFiles.push(processedPng);
-          console.log(`Successfully added white background to ${currentFile.name}`);
-        } else {
-          console.log(`PNG processed, using current version: ${currentFile.name}`);
-          processedFiles.push(currentFile);
+    }
+    
+    // Step 2: Handle PNG/WebP transparency ONLY if background removal is disabled
+    if (!shouldRemoveBackground) {
+      if (currentFile.type === 'image/png' || currentFile.name.toLowerCase().endsWith('.png')) {
+        try {
+          console.log(`Checking PNG transparency for: ${currentFile.name}`);
+          const hasTransparency = await pngHasTransparency(currentFile);
+          
+          if (hasTransparency) {
+            console.log(`Adding white background to transparent PNG: ${currentFile.name}`);
+            currentFile = await addWhiteBackgroundToPng(currentFile);
+            console.log(`Successfully added white background to ${currentFile.name}`);
+          }
+        } catch (error) {
+          console.warn(`PNG processing failed for ${currentFile.name}:`, error);
         }
-      } catch (error) {
-        console.warn(`PNG processing failed for ${currentFile.name}, keeping current version:`, error);
-        processedFiles.push(currentFile);
-      }
-    } else if (currentFile.type === 'image/webp' || currentFile.name.toLowerCase().endsWith('.webp')) {
-      try {
-        console.log(`Checking WebP transparency for: ${currentFile.name}`);
-        const hasTransparency = await webpHasTransparency(currentFile);
-        
-        if (hasTransparency && !shouldRemoveBackground) { // Only add white bg if we didn't already process with AI
-          console.log(`Adding white background to transparent WebP: ${currentFile.name}`);
-          const processedWebp = await addWhiteBackgroundToWebp(currentFile);
-          processedFiles.push(processedWebp);
-          console.log(`Successfully added white background to ${currentFile.name}`);
-        } else {
-          console.log(`WebP processed, using current version: ${currentFile.name}`);
-          processedFiles.push(currentFile);
+      } else if (currentFile.type === 'image/webp' || currentFile.name.toLowerCase().endsWith('.webp')) {
+        try {
+          console.log(`Checking WebP transparency for: ${currentFile.name}`);
+          const hasTransparency = await webpHasTransparency(currentFile);
+          
+          if (hasTransparency) {
+            console.log(`Adding white background to transparent WebP: ${currentFile.name}`);
+            currentFile = await addWhiteBackgroundToWebp(currentFile);
+            console.log(`Successfully added white background to ${currentFile.name}`);
+          }
+        } catch (error) {
+          console.warn(`WebP processing failed for ${currentFile.name}:`, error);
         }
-      } catch (error) {
-        console.warn(`WebP processing failed for ${currentFile.name}, keeping current version:`, error);
-        processedFiles.push(currentFile);
       }
     } else {
-      // For other image types, just use the processed version
-      processedFiles.push(currentFile);
+      // Background removal enabled - server will handle everything
+      console.log(`Background removal enabled - server will process: ${currentFile.name}`);
     }
+    
+    // Add the processed file to results (server will handle background removal)
+    processedFiles.push(currentFile);
+    console.log(`=== Finished client processing: ${currentFile.name} ===`);
   }
   
   return processedFiles;
@@ -680,6 +559,7 @@ function FootwearAligner() {
     // Build your FormData
     const formData = new FormData();
     formData.append("preview", "true"); // Add preview flag
+    formData.append("removeBackground", removeBackground.toString()); // Add background removal setting
     if (selectedImages.length > 0) {
       selectedImages.forEach((file) => {
         formData.append("images", file);
@@ -749,6 +629,7 @@ function FootwearAligner() {
 
     // Build your FormData
     const formData = new FormData();
+    formData.append("removeBackground", removeBackground.toString()); // Add background removal setting
     if (selectedImages.length > 0) {
       selectedImages.forEach((file) => {
         formData.append("images", file);
@@ -866,7 +747,7 @@ function FootwearAligner() {
                 </label>
                 <p className="text-xs text-gray-500 mt-1">
                   {removeBackground 
-                    ? "✅ AI will remove backgrounds to show only the footwear. Processing will take longer but results are better." 
+                    ? "✅ AI will remove backgrounds on the server for super-fast processing of thousands of images. Only the footwear will remain." 
                     : "⚠️ Only basic format conversion and transparency handling (faster but backgrounds may remain)."}
                 </p>
               </div>
@@ -897,7 +778,7 @@ function FootwearAligner() {
                 )}
                 <p className="text-xs text-gray-500 mt-1">
                   {removeBackground 
-                    ? "All images will have their backgrounds removed using AI. AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails."
+                    ? "Background removal will be handled on the server for maximum speed. AVIF files will be converted to JPEG if your browser supports AVIF. Files will be processed on the server for optimal performance."
                     : "AVIF files will be converted to JPEG if your browser supports AVIF. PNG and WebP files with transparency will automatically get a white background. Files may be processed on the server if client-side processing fails."}
                 </p>
               </div>
