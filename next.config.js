@@ -16,8 +16,26 @@ const nextConfig = {
       };
     }
 
+    // Mark large dependencies as external for serverless functions to reduce bundle size
+    if (isServer) {
+      config.externals.push(
+        'sharp',
+        'puppeteer',
+        '@imgly/background-removal-node',
+        'archiver',
+        'formidable',
+        'node-fetch',
+        'papaparse',
+        'text-to-svg',
+      );
+    }
+
     return config;
   },
+
+  // Optimize build output
+  productionBrowserSourceMaps: false,
+  swcMinify: true,
 };
 
 module.exports = nextConfig; 

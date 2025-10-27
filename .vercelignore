@@ -1,0 +1,16 @@
+node_modules
+.next
+.git
+.gitignore
+.eslintrc.json
+eslint.config.mjs
+tsconfig.json
+README.md
+*.md
+.env.local
+.env.*.local
+tmp
+public/brands
+public/coming-bg.jpg
+public/fonts
+pages/camping\ for\ magento.html
