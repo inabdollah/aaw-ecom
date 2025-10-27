@@ -18,6 +18,7 @@ const nextConfig = {
 
     // Mark large dependencies as external for serverless functions to reduce bundle size
     if (isServer) {
+      config.externals = config.externals || [];
       config.externals.push(
         'sharp',
         'puppeteer',
@@ -32,10 +33,6 @@ const nextConfig = {
 
     return config;
   },
-
-  // Optimize build output
-  productionBrowserSourceMaps: false,
-  swcMinify: true,
 };
 
 module.exports = nextConfig; 
