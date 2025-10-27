@@ -1,0 +1,15 @@
+{
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "framework": "nextjs",
+  "env": {
+    "NODE_OPTIONS": "--max-old-space-size=3072"
+  },
+  "functions": {
+    "pages/api/**": {
+      "maxDuration": 60,
+      "memory": 3008
+    }
+  }
+}

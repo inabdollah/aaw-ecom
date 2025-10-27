@@ -22,6 +22,10 @@ const nextConfig = {
       },
     ],
   },
+
+  experimental: {
+    isrMemoryCacheSize: 0,
+  },
   
   webpack: (config, { isServer }) => {
     // Properly resolve @ path alias
@@ -45,17 +49,28 @@ const nextConfig = {
 
     // Mark large dependencies as external for serverless functions to reduce bundle size
     if (isServer) {
-      config.externals = config.externals || [];
-      config.externals.push(
+      const largeModules = [
         'sharp',
         'puppeteer',
+        '@imgly/background-removal',
         '@imgly/background-removal-node',
         'archiver',
         'formidable',
         'node-fetch',
         'papaparse',
         'text-to-svg',
-      );
+        'multer',
+        'axios',
+      ];
+
+      config.externals = config.externals || [];
+      
+      // Add all large modules as externals
+      largeModules.forEach(module => {
+        if (!config.externals.includes(module)) {
+          config.externals.push(module);
+        }
+      });
     }
 
     return config;
