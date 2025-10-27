@@ -2,7 +2,34 @@
 const nextConfig = {
   reactStrictMode: true,
   
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'prod.aaw.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 'tap-assets.b-cdn.net',
+      },
+      {
+        protocol: 'https',
+        hostname: 'static.aawweb.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 'via.placeholder.com',
+      },
+    ],
+  },
+  
   webpack: (config, { isServer }) => {
+    // Properly resolve @ path alias
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@': require('path').resolve(__dirname),
+    };
+
     // Fallback for Node.js modules in client-side
     if (!isServer) {
       config.resolve.fallback = {
